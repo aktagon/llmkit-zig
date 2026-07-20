@@ -98,6 +98,7 @@ pub const Text = struct {
     schema_: ?[]const u8 = null,
     protocol_: request.Protocol = .chat,
     safety_settings_: []const request.SafetySetting = &.{},
+    caching_: bool = false,
     media_: [max_media_parts]request.MediaPart = undefined,
     media_count_: usize = 0,
 
@@ -219,6 +220,16 @@ pub const Text = struct {
         return s;
     }
 
+    /// Enable prompt caching on this send path (ADR-026). Applied by
+    /// construction in `buildChatBody`; the caching-text-anthropic golden
+    /// asserts the cache_control-annotated system block. Mirrors Go/Rust
+    /// `.Caching()`.
+    pub fn caching(self: Text) Text {
+        var s = self;
+        s.caching_ = true;
+        return s;
+    }
+
     /// Append an inline image input Part (ADR-060). `mime` is the IANA media
     /// type (e.g. "image/png"); `bytes` is RAW (not base64) — the request
     /// builder encodes it per provider. Media Parts precede the prompt text in
@@ -268,6 +279,7 @@ pub const Text = struct {
             .schema = self.schema_,
             .protocol = self.protocol_,
             .safety_settings = self.safety_settings_,
+            .caching = self.caching_,
         };
     }
 

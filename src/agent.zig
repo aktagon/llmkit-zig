@@ -93,6 +93,7 @@ pub const Agent = struct {
             .model = self.model_,
             .system = self.system_,
             .prompt = prompt,
+            .caching = self.caching_,
         };
     }
 
@@ -100,10 +101,11 @@ pub const Agent = struct {
     /// (when caching is enabled) cache_control by construction. The request-wire
     /// tooldef / caching-agent goldens assert these bytes.
     pub fn buildBody(self: Agent, arena: std.mem.Allocator, prompt: []const u8) !json.Value {
+        // Caching (self.caching_) is threaded through chatConfig -> buildChatBody,
+        // so it is applied by construction before the tool defs are attached.
         var body = try request.buildChatBody(arena, self.chatConfig(prompt));
         if (self.tool_count_ > 0)
             try applyToolDefs(arena, &body, self.provider, self.tools_[0..self.tool_count_]);
-        // Caching (self.caching_) is applied by construction here as of slice 5.
         return body;
     }
 

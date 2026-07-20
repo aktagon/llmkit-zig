@@ -13,6 +13,7 @@ pub const response = @import("response.zig");
 pub const http = @import("http.zig");
 pub const stream = @import("stream.zig");
 pub const agent = @import("agent.zig");
+pub const caching = @import("caching.zig");
 pub const job = @import("job.zig");
 pub const batch = @import("batch.zig");
 pub const client = @import("client.zig");
