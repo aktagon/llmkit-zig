@@ -14,6 +14,12 @@ const request = @import("request.zig");
 
 pub const ProviderName = providers.ProviderName;
 
+/// Chat-protocol selector (ADR-055), re-exported from `request.zig`.
+pub const Protocol = request.Protocol;
+
+/// Google safety setting `{category, threshold}`, re-exported from `request.zig`.
+pub const SafetySetting = request.SafetySetting;
+
 /// One caller-supplied header name/value pair (ADR-052 `addHeader` parity).
 const HeaderPair = struct {
     name: []const u8,
@@ -81,6 +87,8 @@ pub const Text = struct {
     thinking_budget_: ?i64 = null,
     top_k_: ?i64 = null,
     schema_: ?[]const u8 = null,
+    protocol_: request.Protocol = .chat,
+    safety_settings_: []const request.SafetySetting = &.{},
     media_: [max_media_parts]request.MediaPart = undefined,
     media_count_: usize = 0,
 
@@ -182,6 +190,26 @@ pub const Text = struct {
         return s;
     }
 
+    /// Select a non-default chat protocol (ADR-055). `.responses` POSTs the
+    /// OpenAI Responses `{input}` envelope to `/v1/responses` instead of the
+    /// default Chat Completions `{messages}` envelope; `.chat` (the default)
+    /// keeps the provider's default protocol. Mirrors Go/Rust `Protocol(...)`.
+    pub fn protocol(self: Text, p: Protocol) Text {
+        var s = self;
+        s.protocol_ = p;
+        return s;
+    }
+
+    /// Google safety settings (ADR-024): a top-level `safetySettings` array of
+    /// `{category, threshold}` pairs, emitted only on the Google wire shape.
+    /// `settings` is a caller-owned slice (chain methods take no allocator).
+    /// Mirrors Go `SafetySettings([]SafetySetting)`.
+    pub fn safetySettings(self: Text, settings: []const SafetySetting) Text {
+        var s = self;
+        s.safety_settings_ = settings;
+        return s;
+    }
+
     /// Append an inline image input Part (ADR-060). `mime` is the IANA media
     /// type (e.g. "image/png"); `bytes` is RAW (not base64) — the request
     /// builder encodes it per provider. Media Parts precede the prompt text in
@@ -229,6 +257,8 @@ pub const Text = struct {
             .stop_sequences = self.stop_sequences_,
             .thinking_budget = self.thinking_budget_,
             .schema = self.schema_,
+            .protocol = self.protocol_,
+            .safety_settings = self.safety_settings_,
         };
     }
 
