@@ -23,6 +23,7 @@ const std = @import("std");
 const json = @import("json.zig");
 const parts = @import("parts.zig");
 const schema_mod = @import("schema.zig");
+const caching_mod = @import("caching.zig");
 const providers = @import("providers/generated/providers.zig");
 const opts = @import("options_apply.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
@@ -74,6 +75,10 @@ pub const ChatConfig = struct {
     /// strict/strip transform, and places it per the generated structured-output
     /// def (`schema.zig`). Null keeps the plain (no-schema) wire shape.
     schema: ?[]const u8 = null,
+    /// Prompt caching (ADR-026). When true, `buildChatBody` applies
+    /// cache_control by construction (a no-op for a provider without explicit
+    /// caching). One flag on the shared config -> caching on text/agent/batch.
+    caching: bool = false,
 };
 
 pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
@@ -109,6 +114,11 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
     // strict/strip transform, and place it per the generated def — a post-step
     // on the built body, exactly as Go/Rust apply it. No-op when unset.
     if (cfg.schema) |s| try schema_mod.apply(arena, &body, cfg.provider, s);
+
+    // Prompt caching by construction (ADR-026): the single site every send path
+    // (text/agent/batch) inherits. No-op unless caching is on and the provider
+    // uses explicit caching.
+    if (cfg.caching) try caching_mod.applyCaching(arena, &body, cfg.provider);
     return body;
 }
 
