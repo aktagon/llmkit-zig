@@ -30,20 +30,26 @@ pub fn build(b: *std.Build) void {
         "wire-request",
         "Run the request-wire driver and drop target/wire/request/<fixture>/zig.json artifacts",
     );
+    const wire_response_step = b.step(
+        "wire-response",
+        "Run the response-wire driver and drop target/wire/response/<fixture>/zig.json artifacts",
+    );
 
     // In-module unit tests (src/*.zig).
     const mod_tests = b.addTest(.{ .root_module = llmkit_mod });
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
 
     // Standalone test drivers under tests/ — each sees the `llmkit` module.
-    // "wire-request" runs only the request-wire driver (mirrors the other
-    // SDKs' filtered `--filter RequestWireTests`-style Makefile line) so
-    // `make test-request-wire` need not run the full unit-test suite.
-    for ([_][]const u8{
-        "tests/request_wire_test.zig",
+    // Each driver joins `test` plus its own filtered wire step (mirrors the
+    // other SDKs' `--filter RequestWireTests`-style Makefile lines), so
+    // `make test-{request,response}-wire` need not run the full unit suite.
+    const Driver = struct { path: []const u8, wire_step: *std.Build.Step };
+    for ([_]Driver{
+        .{ .path = "tests/request_wire_test.zig", .wire_step = wire_request_step },
+        .{ .path = "tests/response_wire_test.zig", .wire_step = wire_response_step },
     }) |driver| {
         const driver_mod = b.createModule(.{
-            .root_source_file = b.path(driver),
+            .root_source_file = b.path(driver.path),
             .target = target,
             .optimize = optimize,
         });
@@ -51,6 +57,6 @@ pub fn build(b: *std.Build) void {
         const driver_tests = b.addTest(.{ .root_module = driver_mod });
         const run_driver = b.addRunArtifact(driver_tests);
         test_step.dependOn(&run_driver.step);
-        wire_request_step.dependOn(&run_driver.step);
+        driver.wire_step.dependOn(&run_driver.step);
     }
 }

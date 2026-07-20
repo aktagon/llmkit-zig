@@ -9,6 +9,7 @@ const std = @import("std");
 pub const json = @import("json.zig");
 pub const providers = @import("providers/generated/providers.zig");
 pub const request = @import("request.zig");
+pub const response = @import("response.zig");
 pub const client = @import("client.zig");
 
 pub const Client = client.Client;
