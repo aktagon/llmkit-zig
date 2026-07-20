@@ -16,6 +16,7 @@ pub const agent = @import("agent.zig");
 pub const caching = @import("caching.zig");
 pub const job = @import("job.zig");
 pub const batch = @import("batch.zig");
+pub const sigv4 = @import("sigv4.zig");
 pub const client = @import("client.zig");
 
 pub const Client = client.Client;
