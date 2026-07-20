@@ -7,7 +7,9 @@
 //! options.zig`) — the same `supportedOptions` / `optionOverrides` /
 //! `modelOptionOverrides` resolution every other SDK's `addOptions`/
 //! `add_options` performs (ADR-024 per-model overrides, ADR-029 THK-003 root
-//! extras). Later phases add the Anthropic / Google / Bedrock wire shapes.
+//! extras). Slice B (HANDOFF-042) adds the `ChatAnthropic` wire shape
+//! (top-level `system` string, same table-driven options); Google / Bedrock
+//! land in later phases.
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -34,37 +36,64 @@ pub const ChatConfig = struct {
 pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
 
 /// Build the ChatCompletion request body as a dynamic JSON Value backed by
-/// `arena`. Phase 2: the `ChatOpenAI` shape only (Anthropic / Google /
-/// Bedrock land in a later phase).
+/// `arena`, dispatching on the provider's `chat_wire_shape`. Phase 2 covers
+/// `ChatOpenAI` (system-in-messages) and `ChatAnthropic` (top-level `system`
+/// string); Google / Bedrock land in a later phase and still reject.
 pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
-    if (!std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI")) {
-        return error.UnsupportedWireShape;
-    }
+    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI"))
+        return buildOpenAIBody(arena, cfg);
+    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatAnthropic"))
+        return buildAnthropicBody(arena, cfg);
+    return error.UnsupportedWireShape;
+}
 
+/// The `ChatOpenAI` wire shape: the system prompt (when present) is a leading
+/// `{role:"system", content:...}` message inside `messages`.
+fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     var body = json.object();
-
     if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
 
     var messages = json.array(arena);
-    // System-in-messages placement: a leading {role:"system", content:...}.
     if (cfg.system) |sys| {
         var sm = json.object();
         try json.set(arena, &sm, "role", .{ .string = "system" });
         try json.set(arena, &sm, "content", .{ .string = sys });
         try messages.array.append(sm);
     }
-    // The single user text message. The OpenAI shape sends a bare string for a
-    // lone text part (media parts switch it to a parts array in a later phase).
-    var um = json.object();
-    try json.set(arena, &um, "role", .{ .string = "user" });
-    try json.set(arena, &um, "content", .{ .string = cfg.prompt });
-    try messages.array.append(um);
+    try appendUserMessage(arena, &messages, cfg.prompt);
     try json.set(arena, &body, "messages", messages);
 
     try applyOptions(arena, &body, cfg);
-
     return body;
+}
+
+/// The `ChatAnthropic` wire shape: the system prompt (when present) is a
+/// TOP-LEVEL `"system"` string field on the body — not a message — so
+/// `messages` carries only the non-system turns. Options are identical to the
+/// OpenAI shape (same table-driven `applyOptions`); Anthropic's wire keys
+/// (`stop_sequences`, `top_k`, `thinking.*`, `output_config.effort` + root
+/// `thinking:{type:adaptive}`) come from the generated option table.
+fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+    var body = json.object();
+    if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
+    if (cfg.system) |sys| try json.set(arena, &body, "system", .{ .string = sys });
+
+    var messages = json.array(arena);
+    try appendUserMessage(arena, &messages, cfg.prompt);
+    try json.set(arena, &body, "messages", messages);
+
+    try applyOptions(arena, &body, cfg);
+    return body;
+}
+
+/// Appends the single user text message. Both shapes send a bare string for a
+/// lone text part (media parts switch it to a parts array in a later phase).
+fn appendUserMessage(arena: std.mem.Allocator, messages: *json.Value, prompt: []const u8) !void {
+    var um = json.object();
+    try json.set(arena, &um, "role", .{ .string = "user" });
+    try json.set(arena, &um, "content", .{ .string = prompt });
+    try messages.array.append(um);
 }
 
 /// Places every set generation parameter on `body` at its per-provider
