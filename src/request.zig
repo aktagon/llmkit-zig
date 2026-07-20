@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const json = @import("json.zig");
-const providers = @import("providers.zig");
+const providers = @import("providers/generated/providers.zig");
 
 pub const ChatConfig = struct {
     provider: providers.ProviderName,

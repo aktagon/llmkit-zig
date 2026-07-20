@@ -7,7 +7,7 @@
 const std = @import("std");
 
 pub const json = @import("json.zig");
-pub const providers = @import("providers.zig");
+pub const providers = @import("providers/generated/providers.zig");
 pub const request = @import("request.zig");
 pub const client = @import("client.zig");
 
