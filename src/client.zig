@@ -9,14 +9,28 @@
 
 const std = @import("std");
 const json = @import("json.zig");
-const providers = @import("providers.zig");
+const providers = @import("providers/generated/providers.zig");
 const request = @import("request.zig");
 
 pub const ProviderName = providers.ProviderName;
 
+/// One caller-supplied header name/value pair (ADR-052 `addHeader` parity).
+const HeaderPair = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// Fixed capacity for `Client.addHeader` — Client chain methods take no
+/// allocator (ADR-069 ZIG-005), so custom headers live in a bounded array
+/// rather than a heap-allocated list. 16 is generous headroom over every
+/// other SDK's real-world usage; raise it if a caller ever needs more.
+const max_custom_headers = 16;
+
 pub const Client = struct {
     provider: providers.ProviderName,
     base_url: ?[]const u8 = null,
+    custom_headers: [max_custom_headers]HeaderPair = undefined,
+    custom_header_count: usize = 0,
 
     pub fn init(provider: providers.ProviderName) Client {
         return .{ .provider = provider };
@@ -26,6 +40,18 @@ pub const Client = struct {
     pub fn baseURL(self: Client, url: []const u8) Client {
         var c = self;
         c.base_url = url;
+        return c;
+    }
+
+    /// Add a custom header sent with every request (ADR-052 parity with the
+    /// other five SDKs' `AddHeader`/`addHeader`/`add_header`). Wiring onto
+    /// the actual HTTP send arrives with the HTTP module in a later phase;
+    /// today this only records the pair on the (still-immutable) builder.
+    pub fn addHeader(self: Client, name: []const u8, value: []const u8) Client {
+        var c = self;
+        std.debug.assert(c.custom_header_count < max_custom_headers);
+        c.custom_headers[c.custom_header_count] = .{ .name = name, .value = value };
+        c.custom_header_count += 1;
         return c;
     }
 
@@ -42,6 +68,13 @@ pub const Text = struct {
     max_tokens_: ?i64 = null,
     temperature_: ?f64 = null,
     top_p_: ?f64 = null,
+    frequency_penalty_: ?f64 = null,
+    presence_penalty_: ?f64 = null,
+    reasoning_effort_: ?[]const u8 = null,
+    seed_: ?i64 = null,
+    stop_sequences_: ?[]const []const u8 = null,
+    thinking_budget_: ?i64 = null,
+    top_k_: ?i64 = null,
 
     pub fn model(self: Text, m: []const u8) Text {
         var s = self;
@@ -70,6 +103,63 @@ pub const Text = struct {
     pub fn topP(self: Text, p: f64) Text {
         var s = self;
         s.top_p_ = p;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only — per-provider
+    /// wire emission arrives with the generated option table in Phase 2
+    /// (ChatCompletion parity, `docs/handoffs/041-...`).
+    pub fn frequencyPenalty(self: Text, v: f64) Text {
+        var s = self;
+        s.frequency_penalty_ = v;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only (see
+    /// `frequencyPenalty`).
+    pub fn presencePenalty(self: Text, v: f64) Text {
+        var s = self;
+        s.presence_penalty_ = v;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only (see
+    /// `frequencyPenalty`).
+    pub fn reasoningEffort(self: Text, v: []const u8) Text {
+        var s = self;
+        s.reasoning_effort_ = v;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only (see
+    /// `frequencyPenalty`).
+    pub fn seed(self: Text, v: i64) Text {
+        var s = self;
+        s.seed_ = v;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only (see
+    /// `frequencyPenalty`).
+    pub fn stopSequences(self: Text, v: []const []const u8) Text {
+        var s = self;
+        s.stop_sequences_ = v;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only (see
+    /// `frequencyPenalty`).
+    pub fn thinkingBudget(self: Text, v: i64) Text {
+        var s = self;
+        s.thinking_budget_ = v;
+        return s;
+    }
+
+    /// ADR-024 option. Phase 1: recorded on the builder only (see
+    /// `frequencyPenalty`).
+    pub fn topK(self: Text, v: i64) Text {
+        var s = self;
+        s.top_k_ = v;
         return s;
     }
 
