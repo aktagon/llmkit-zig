@@ -61,6 +61,11 @@ pub const Client = struct {
     }
 };
 
+/// Fixed capacity for `Text.image`/`Text.file` media Parts. Text chain methods
+/// take no allocator (ADR-069 ZIG-005), so media Parts live in a bounded array
+/// like `Client.addHeader`. 8 is generous over any single-turn multimodal use.
+const max_media_parts = 8;
+
 pub const Text = struct {
     provider: providers.ProviderName,
     model_: ?[]const u8 = null,
@@ -75,6 +80,8 @@ pub const Text = struct {
     stop_sequences_: ?[]const []const u8 = null,
     thinking_budget_: ?i64 = null,
     top_k_: ?i64 = null,
+    media_: [max_media_parts]request.MediaPart = undefined,
+    media_count_: usize = 0,
 
     pub fn model(self: Text, m: []const u8) Text {
         var s = self;
@@ -163,6 +170,29 @@ pub const Text = struct {
         return s;
     }
 
+    /// Append an inline image input Part (ADR-060). `mime` is the IANA media
+    /// type (e.g. "image/png"); `bytes` is RAW (not base64) — the request
+    /// builder encodes it per provider. Media Parts precede the prompt text in
+    /// the user turn, in call order. Mirrors Rust/Go `image(mime, bytes)`.
+    pub fn image(self: Text, mime: []const u8, bytes: []const u8) Text {
+        var s = self;
+        std.debug.assert(s.media_count_ < max_media_parts);
+        s.media_[s.media_count_] = .{ .image = .{ .mime = mime, .bytes = bytes } };
+        s.media_count_ += 1;
+        return s;
+    }
+
+    /// Append an uploaded-file input Part by id (ADR-060 / BUG-014). Emits an
+    /// Anthropic `document` or an OpenAI-style `file` block, selected by wire
+    /// shape (never provider name). Mirrors Rust/Go `file(id)`.
+    pub fn file(self: Text, file_id: []const u8) Text {
+        var s = self;
+        std.debug.assert(s.media_count_ < max_media_parts);
+        s.media_[s.media_count_] = .{ .file = file_id };
+        s.media_count_ += 1;
+        return s;
+    }
+
     /// Build the request body for this configuration. Returns a Value backed by
     /// `arena`. Phase 0/1 do no HTTP send.
     pub fn buildBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
@@ -171,6 +201,7 @@ pub const Text = struct {
             .model = self.model_,
             .system = self.system_,
             .prompt = prompt,
+            .media = self.media_[0..self.media_count_],
             .max_tokens = self.max_tokens_,
             .temperature = self.temperature_,
             .top_p = self.top_p_,

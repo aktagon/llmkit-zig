@@ -13,18 +13,30 @@
 //! options wrapped in `generationConfig` per `spec.wraps_options_in`). Slice D
 //! adds the `ChatBedrock` wire shape (Converse API: `content`/`system` as
 //! arrays of `{text}` blocks, no `model` in body, options wrapped in
-//! `inferenceConfig`).
+//! `inferenceConfig`). Slice E (ADR-060) adds multimodal input Parts on the
+//! text path: image + file Parts precede the trailing prompt-text Part in the
+//! user turn, serialized per provider (OpenAI `image_url`/`file`, Anthropic
+//! `image`/`document`, Google `inline_data`, Bedrock Converse `image`) — the
+//! bare-text wire shape is preserved byte-for-byte when no media Parts are set.
 
 const std = @import("std");
 const json = @import("json.zig");
+const parts = @import("parts.zig");
 const providers = @import("providers/generated/providers.zig");
 const options = @import("providers/generated/options.zig");
+
+/// A non-text input Part on the ChatCompletion text path (ADR-060), re-exported
+/// from `parts.zig` where the per-provider serialization lives.
+pub const MediaPart = parts.MediaPart;
 
 pub const ChatConfig = struct {
     provider: providers.ProviderName,
     model: ?[]const u8 = null,
     system: ?[]const u8 = null,
     prompt: []const u8,
+    /// Media Parts (image/file) that precede the prompt text Part in the user
+    /// turn, in caller order (ADR-060). Empty keeps the bare-text wire shape.
+    media: []const MediaPart = &.{},
     max_tokens: ?i64 = null,
     temperature: ?f64 = null,
     top_p: ?f64 = null,
@@ -71,7 +83,10 @@ fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
         try json.set(arena, &sm, "content", .{ .string = sys });
         try messages.array.append(sm);
     }
-    try appendUserMessage(arena, &messages, cfg.prompt);
+    var um = json.object();
+    try json.set(arena, &um, "role", .{ .string = "user" });
+    try json.set(arena, &um, "content", try parts.openAIUserContent(arena, cfg.media, cfg.prompt));
+    try messages.array.append(um);
     try json.set(arena, &body, "messages", messages);
 
     // Options and root extras both land on `body` (no wrapper): opts_target == root.
@@ -91,7 +106,10 @@ fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json
     if (cfg.system) |sys| try json.set(arena, &body, "system", .{ .string = sys });
 
     var messages = json.array(arena);
-    try appendUserMessage(arena, &messages, cfg.prompt);
+    var um = json.object();
+    try json.set(arena, &um, "role", .{ .string = "user" });
+    try json.set(arena, &um, "content", try parts.anthropicUserContent(arena, cfg.media, cfg.prompt));
+    try messages.array.append(um);
     try json.set(arena, &body, "messages", messages);
 
     // Options and root extras both land on `body` (no wrapper): opts_target == root.
@@ -116,7 +134,7 @@ fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
     var contents = json.array(arena);
     var turn = json.object();
     try json.set(arena, &turn, "role", .{ .string = "user" });
-    try json.set(arena, &turn, "parts", try textParts(arena, cfg.prompt));
+    try json.set(arena, &turn, "parts", try parts.googleParts(arena, cfg.media, cfg.prompt));
     try contents.array.append(turn);
     try json.set(arena, &body, "contents", contents);
 
@@ -161,7 +179,7 @@ fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.V
     var messages = json.array(arena);
     var turn = json.object();
     try json.set(arena, &turn, "role", .{ .string = "user" });
-    try json.set(arena, &turn, "content", try textParts(arena, cfg.prompt));
+    try json.set(arena, &turn, "content", try parts.bedrockContent(arena, cfg.media, cfg.prompt));
     try messages.array.append(turn);
     try json.set(arena, &body, "messages", messages);
 
@@ -181,20 +199,11 @@ fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.V
 /// shape (a content turn and a `system_instruction`) and the Bedrock Converse
 /// shape (a `content` array and a `system` array).
 fn textParts(arena: std.mem.Allocator, text: []const u8) !json.Value {
-    var parts = json.array(arena);
+    var arr = json.array(arena);
     var part = json.object();
     try json.set(arena, &part, "text", .{ .string = text });
-    try parts.array.append(part);
-    return parts;
-}
-
-/// Appends the single user text message. Both shapes send a bare string for a
-/// lone text part (media parts switch it to a parts array in a later phase).
-fn appendUserMessage(arena: std.mem.Allocator, messages: *json.Value, prompt: []const u8) !void {
-    var um = json.object();
-    try json.set(arena, &um, "role", .{ .string = "user" });
-    try json.set(arena, &um, "content", .{ .string = prompt });
-    try messages.array.append(um);
+    try arr.array.append(part);
+    return arr;
 }
 
 /// Places every set generation parameter at its per-provider (and, per
@@ -220,8 +229,14 @@ fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.
         try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_p, .{ .float = v });
     if (cfg.top_k) |v|
         try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_k, .{ .integer = v });
-    if (cfg.max_tokens) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = v });
+    // Effective max_tokens defaults to the provider's `default_max_tokens`
+    // (mirrors Rust's `options.max_tokens.unwrap_or(config.default_max_tokens)`):
+    // a user who never called `.maxTokens(...)` still emits the provider default,
+    // routed through the same table-driven path (ADR-024 remap + wrapper
+    // placement apply to the defaulted value). Emit only when > 0.
+    const max_tokens = cfg.max_tokens orelse providers.spec(cfg.provider).default_max_tokens;
+    if (max_tokens > 0)
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = max_tokens });
     if (cfg.seed) |v|
         try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .seed, .{ .integer = v });
     if (cfg.frequency_penalty) |v|
