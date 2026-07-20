@@ -13,6 +13,7 @@ const providers = @import("providers/generated/providers.zig");
 const request = @import("request.zig");
 const http = @import("http.zig");
 const stream_mod = @import("stream.zig");
+const agent_mod = @import("agent.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -65,6 +66,11 @@ pub const Client = struct {
 
     /// Enter the ChatCompletion (text) builder.
     pub fn text(self: Client) Text {
+        return .{ .provider = self.provider };
+    }
+
+    /// Enter the Agent (tool-using ChatCompletion) builder.
+    pub fn agent(self: Client) agent_mod.Agent {
         return .{ .provider = self.provider };
     }
 };
