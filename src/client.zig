@@ -14,6 +14,7 @@ const request = @import("request.zig");
 const http = @import("http.zig");
 const stream_mod = @import("stream.zig");
 const agent_mod = @import("agent.zig");
+const batch_mod = @import("batch.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -282,6 +283,16 @@ pub const Text = struct {
     /// arena-backed slice. Pure — no HTTP send, no auth header (needs the key).
     pub fn buildHeaders(self: Text, arena: std.mem.Allocator, prompt: []const u8) ![]request.Header {
         return request.buildRequestHeaders(arena, self.chatConfig(prompt));
+    }
+
+    /// Build the BATCH CREATE request body for this configuration (ADR-064 —
+    /// batch is a Text execution mode). Each prompt reuses this builder's config
+    /// (model/system/media/options) as one `{custom_id:"req-N", params:<body>}`
+    /// item; a file-referencing item's `anthropic-beta` value is returned in
+    /// `beta_headers` for the CREATE request (BUG-017). Pure — the request-wire
+    /// batch goldens assert the payload + the composed header.
+    pub fn buildBatchBody(self: Text, arena: std.mem.Allocator, prompts: []const []const u8) !batch_mod.BatchBuildResult {
+        return batch_mod.buildBatchBody(arena, self.provider, self.chatConfig(""), prompts);
     }
 
     /// Build the STREAMING request body for this configuration (Phase 3 slice 2):

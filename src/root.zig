@@ -13,12 +13,15 @@ pub const response = @import("response.zig");
 pub const http = @import("http.zig");
 pub const stream = @import("stream.zig");
 pub const agent = @import("agent.zig");
+pub const job = @import("job.zig");
+pub const batch = @import("batch.zig");
 pub const client = @import("client.zig");
 
 pub const Client = client.Client;
 pub const Text = client.Text;
 pub const Agent = agent.Agent;
 pub const Tool = agent.Tool;
+pub const BatchHandle = batch.BatchHandle;
 pub const ProviderName = providers.ProviderName;
 pub const Protocol = client.Protocol;
 pub const SafetySetting = client.SafetySetting;
