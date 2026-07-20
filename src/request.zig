@@ -8,8 +8,10 @@
 //! `modelOptionOverrides` resolution every other SDK's `addOptions`/
 //! `add_options` performs (ADR-024 per-model overrides, ADR-029 THK-003 root
 //! extras). Slice B (HANDOFF-042) adds the `ChatAnthropic` wire shape
-//! (top-level `system` string, same table-driven options); Google / Bedrock
-//! land in later phases.
+//! (top-level `system` string, same table-driven options); Slice C adds the
+//! `ChatGoogle` wire shape (`contents`/`parts`, sibling `system_instruction`,
+//! options wrapped in `generationConfig` per `spec.wraps_options_in`). Bedrock
+//! lands in a later phase.
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -37,14 +39,17 @@ pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
 
 /// Build the ChatCompletion request body as a dynamic JSON Value backed by
 /// `arena`, dispatching on the provider's `chat_wire_shape`. Phase 2 covers
-/// `ChatOpenAI` (system-in-messages) and `ChatAnthropic` (top-level `system`
-/// string); Google / Bedrock land in a later phase and still reject.
+/// `ChatOpenAI` (system-in-messages), `ChatAnthropic` (top-level `system`
+/// string), and `ChatGoogle` (`contents`/`parts`, wrapped options); Bedrock
+/// lands in a later phase and still rejects.
 pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
     if (std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI"))
         return buildOpenAIBody(arena, cfg);
     if (std.mem.eql(u8, spec.chat_wire_shape, "ChatAnthropic"))
         return buildAnthropicBody(arena, cfg);
+    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatGoogle"))
+        return buildGoogleBody(arena, cfg);
     return error.UnsupportedWireShape;
 }
 
@@ -64,7 +69,8 @@ fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
     try appendUserMessage(arena, &messages, cfg.prompt);
     try json.set(arena, &body, "messages", messages);
 
-    try applyOptions(arena, &body, cfg);
+    // Options and root extras both land on `body` (no wrapper): opts_target == root.
+    try applyOptions(arena, &body, &body, cfg);
     return body;
 }
 
@@ -83,8 +89,57 @@ fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json
     try appendUserMessage(arena, &messages, cfg.prompt);
     try json.set(arena, &body, "messages", messages);
 
-    try applyOptions(arena, &body, cfg);
+    // Options and root extras both land on `body` (no wrapper): opts_target == root.
+    try applyOptions(arena, &body, &body, cfg);
     return body;
+}
+
+/// The `ChatGoogle` wire shape: the user turn is a `contents` array of
+/// `{role, parts:[{text:...}]}` objects (not a bare `content` string), the
+/// system prompt (when present) is a sibling `system_instruction` object with
+/// the same `{parts:[{text:...}]}` shape (`SiblingObject` placement), and the
+/// generation options are WRAPPED in a `generationConfig` object named by
+/// `spec.wraps_options_in` — so `max_output_tokens`, `temperature`, and the
+/// dotted `thinkingConfig.thinkingBudget` nest inside the wrapper rather than
+/// at the body root. Root extras (ADR-029 THK-003, none in these fixtures)
+/// still merge into the true body root, never the wrapper. Wire keys come
+/// from the generated option table exactly as the flat shapes do.
+fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+    const spec = providers.spec(cfg.provider);
+    var body = json.object();
+
+    var contents = json.array(arena);
+    var turn = json.object();
+    try json.set(arena, &turn, "role", .{ .string = "user" });
+    try json.set(arena, &turn, "parts", try textParts(arena, cfg.prompt));
+    try contents.array.append(turn);
+    try json.set(arena, &body, "contents", contents);
+
+    if (cfg.system) |sys| {
+        var si = json.object();
+        try json.set(arena, &si, "parts", try textParts(arena, sys));
+        try json.set(arena, &body, "system_instruction", si);
+    }
+
+    // Options go into the wrapper (opts_target = &wrapper); root extras still
+    // merge into the true body root (root = &body). Only attach the wrapper
+    // when it holds at least one option — mirrors Rust's non-empty guard.
+    var wrapper = json.object();
+    try applyOptions(arena, &wrapper, &body, cfg);
+    if (wrapper.object.count() > 0)
+        try json.set(arena, &body, spec.wraps_options_in, wrapper);
+
+    return body;
+}
+
+/// A `[{"text": <s>}]` parts array — the shared Google text-part container for
+/// both a content turn and a `system_instruction`.
+fn textParts(arena: std.mem.Allocator, text: []const u8) !json.Value {
+    var parts = json.array(arena);
+    var part = json.object();
+    try json.set(arena, &part, "text", .{ .string = text });
+    try parts.array.append(part);
+    return parts;
 }
 
 /// Appends the single user text message. Both shapes send a bare string for a
@@ -96,40 +151,48 @@ fn appendUserMessage(arena: std.mem.Allocator, messages: *json.Value, prompt: []
     try messages.array.append(um);
 }
 
-/// Places every set generation parameter on `body` at its per-provider
-/// (and, per ADR-024, per-model) wire key, reading the resolution entirely
-/// from the generated option table — never a hand-switch on provider/model
-/// name. Mirrors Go's `addOptions`/`resolveOptionKey` and Rust's
-/// `add_options`/`resolve_option_key`.
-fn applyOptions(arena: std.mem.Allocator, body: *json.Value, cfg: ChatConfig) !void {
+/// Places every set generation parameter at its per-provider (and, per
+/// ADR-024, per-model) wire key, reading the resolution entirely from the
+/// generated option table — never a hand-switch on provider/model name.
+/// Mirrors Go's `addOptions`/`resolveOptionKey` and Rust's `add_options`/
+/// `resolve_option_key`.
+///
+/// The target is split in two: option wire keys and their sibling
+/// `extra_fields_json` are written to `opts_target`, while root-level
+/// `root_extra_fields_json` (ADR-029 THK-003) merges into `root`. For the flat
+/// shapes (OpenAI/Anthropic) the caller passes the same body as both, so the
+/// split is a no-op and the output stays byte-identical. For the wrapped
+/// Google shape `opts_target` is the `generationConfig` object while `root`
+/// stays the true body — so options nest in the wrapper but root extras do not.
+fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.Value, cfg: ChatConfig) !void {
     const model = cfg.model orelse "";
     var root_extras = json.object();
 
     if (cfg.temperature) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .temperature, .{ .float = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .temperature, .{ .float = v });
     if (cfg.top_p) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .top_p, .{ .float = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_p, .{ .float = v });
     if (cfg.top_k) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .top_k, .{ .integer = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_k, .{ .integer = v });
     if (cfg.max_tokens) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = v });
     if (cfg.seed) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .seed, .{ .integer = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .seed, .{ .integer = v });
     if (cfg.frequency_penalty) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .frequency_penalty, .{ .float = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .frequency_penalty, .{ .float = v });
     if (cfg.presence_penalty) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .presence_penalty, .{ .float = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .presence_penalty, .{ .float = v });
     if (cfg.thinking_budget) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .thinking_budget, .{ .integer = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .thinking_budget, .{ .integer = v });
     if (cfg.reasoning_effort) |v|
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .reasoning_effort, .{ .string = v });
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .reasoning_effort, .{ .string = v });
     if (cfg.stop_sequences) |ss| {
         var arr = json.array(arena);
         for (ss) |s| try arr.array.append(.{ .string = s });
-        try maybeInsert(arena, body, &root_extras, cfg.provider, model, .stop_sequences, arr);
+        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .stop_sequences, arr);
     }
 
-    try json.mergeRoot(arena, body, root_extras);
+    try json.mergeRoot(arena, root, root_extras);
 }
 
 /// Resolves `key`'s wire path for `provider`/`model`: a per-model override
@@ -164,14 +227,16 @@ fn resolveOptionKey(provider: providers.ProviderName, model: []const u8, key: op
     return null;
 }
 
-/// Inserts `value` at `key`'s resolved wire path (a no-op when the provider
-/// does not support `key`), then folds in the option's static sibling fields
-/// (`extra_fields_json`, merged into the leaf's parent object) and root-level
-/// fields (`root_extra_fields_json`, accumulated into `root_extras` for the
-/// caller to merge at the true body root — ADR-029 THK-003).
+/// Inserts `value` at `key`'s resolved wire path on `opts_target` (a no-op
+/// when the provider does not support `key`), then folds in the option's
+/// static sibling fields (`extra_fields_json`, merged into the leaf's parent
+/// object on `opts_target`) and root-level fields (`root_extra_fields_json`,
+/// accumulated into `root_extras` for the caller to merge at the true body
+/// root — ADR-029 THK-003). For a wrapped shape `opts_target` is the wrapper,
+/// so sibling extras stay inside it while root extras still escape to the root.
 fn maybeInsert(
     arena: std.mem.Allocator,
-    body: *json.Value,
+    opts_target: *json.Value,
     root_extras: *json.Value,
     provider: providers.ProviderName,
     model: []const u8,
@@ -179,13 +244,13 @@ fn maybeInsert(
     value: json.Value,
 ) !void {
     const json_key = resolveOptionKey(provider, model, key) orelse return;
-    try json.setPath(arena, body, json_key, value);
+    try json.setPath(arena, opts_target, json_key, value);
 
     for (options.optionOverrides(provider)) |ov| {
         if (ov.key != key) continue;
         if (ov.extra_fields_json.len > 0) {
             if (std.json.parseFromSliceLeaky(json.Value, arena, ov.extra_fields_json, .{})) |extras| {
-                try mergeIntoParent(arena, body, json_key, extras);
+                try mergeIntoParent(arena, opts_target, json_key, extras);
             } else |_| {}
         }
         if (ov.root_extra_fields_json.len > 0) {
