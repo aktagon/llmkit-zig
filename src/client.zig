@@ -11,6 +11,8 @@ const std = @import("std");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const request = @import("request.zig");
+const http = @import("http.zig");
+const stream_mod = @import("stream.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -274,6 +276,29 @@ pub const Text = struct {
     /// arena-backed slice. Pure — no HTTP send, no auth header (needs the key).
     pub fn buildHeaders(self: Text, arena: std.mem.Allocator, prompt: []const u8) ![]request.Header {
         return request.buildRequestHeaders(arena, self.chatConfig(prompt));
+    }
+
+    /// Build the STREAMING request body for this configuration (Phase 3 slice 2):
+    /// the chat body + the stream flag +, when the provider opts in (BUG-028),
+    /// `stream_options:{include_usage:true}`. Pure — the request-wire golden
+    /// asserts these bytes.
+    pub fn buildStreamBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
+        return stream_mod.buildStreamBody(arena, self.chatConfig(prompt));
+    }
+
+    /// Stream a ChatCompletion over the injected transport (ADR-013). Sends the
+    /// stream request, delivers each text delta to `on_chunk` (may be null), and
+    /// returns the accumulated Response. Production passes an `HttpTransport`;
+    /// tests inject a `MockTransport`. Mirrors Rust `stream` / Go `promptStream`.
+    pub fn streamWith(
+        self: Text,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompt: []const u8,
+        on_chunk: ?stream_mod.ChunkCallback,
+    ) !@import("response.zig").Response {
+        return stream_mod.streamWith(transport, arena, self.chatConfig(prompt), api_key, on_chunk);
     }
 };
 
