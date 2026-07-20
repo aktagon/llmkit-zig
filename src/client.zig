@@ -80,6 +80,7 @@ pub const Text = struct {
     stop_sequences_: ?[]const []const u8 = null,
     thinking_budget_: ?i64 = null,
     top_k_: ?i64 = null,
+    schema_: ?[]const u8 = null,
     media_: [max_media_parts]request.MediaPart = undefined,
     media_count_: usize = 0,
 
@@ -170,6 +171,17 @@ pub const Text = struct {
         return s;
     }
 
+    /// Structured JSON-schema output (BUG-007). `json_schema` is a JSON Schema
+    /// STRING; the request builder parses it, applies the per-provider strict
+    /// (OpenAI/Anthropic) or strip (Google) transform, and places it per the
+    /// provider's generated structured-output def — never a provider-name
+    /// switch. Mirrors Go/Rust `.Schema(...)`.
+    pub fn schema(self: Text, json_schema: []const u8) Text {
+        var s = self;
+        s.schema_ = json_schema;
+        return s;
+    }
+
     /// Append an inline image input Part (ADR-060). `mime` is the IANA media
     /// type (e.g. "image/png"); `bytes` is RAW (not base64) — the request
     /// builder encodes it per provider. Media Parts precede the prompt text in
@@ -216,6 +228,7 @@ pub const Text = struct {
             .seed = self.seed_,
             .stop_sequences = self.stop_sequences_,
             .thinking_budget = self.thinking_budget_,
+            .schema = self.schema_,
         };
     }
 
