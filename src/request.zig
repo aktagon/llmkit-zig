@@ -10,8 +10,10 @@
 //! extras). Slice B (HANDOFF-042) adds the `ChatAnthropic` wire shape
 //! (top-level `system` string, same table-driven options); Slice C adds the
 //! `ChatGoogle` wire shape (`contents`/`parts`, sibling `system_instruction`,
-//! options wrapped in `generationConfig` per `spec.wraps_options_in`). Bedrock
-//! lands in a later phase.
+//! options wrapped in `generationConfig` per `spec.wraps_options_in`). Slice D
+//! adds the `ChatBedrock` wire shape (Converse API: `content`/`system` as
+//! arrays of `{text}` blocks, no `model` in body, options wrapped in
+//! `inferenceConfig`).
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -40,8 +42,9 @@ pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
 /// Build the ChatCompletion request body as a dynamic JSON Value backed by
 /// `arena`, dispatching on the provider's `chat_wire_shape`. Phase 2 covers
 /// `ChatOpenAI` (system-in-messages), `ChatAnthropic` (top-level `system`
-/// string), and `ChatGoogle` (`contents`/`parts`, wrapped options); Bedrock
-/// lands in a later phase and still rejects.
+/// string), `ChatGoogle` (`contents`/`parts`, wrapped options), and
+/// `ChatBedrock` (Converse content/system arrays, `inferenceConfig`-wrapped
+/// options, no `model` in body); other shapes still reject.
 pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
     if (std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI"))
@@ -50,6 +53,8 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
         return buildAnthropicBody(arena, cfg);
     if (std.mem.eql(u8, spec.chat_wire_shape, "ChatGoogle"))
         return buildGoogleBody(arena, cfg);
+    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatBedrock"))
+        return buildBedrockBody(arena, cfg);
     return error.UnsupportedWireShape;
 }
 
@@ -132,8 +137,49 @@ fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
     return body;
 }
 
-/// A `[{"text": <s>}]` parts array — the shared Google text-part container for
-/// both a content turn and a `system_instruction`.
+/// The `ChatBedrock` wire shape (AWS Bedrock Converse API): the user turn's
+/// `content` is an ARRAY of `{text:...}` blocks (not a bare string like OpenAI,
+/// nor `parts` like Google), and the system prompt (when present) is a
+/// TOP-LEVEL `system` ARRAY of `{text:...}` blocks — `TopLevelField` placement,
+/// but an array of text blocks unlike Anthropic's bare `system` string. The
+/// model is carried in the URL, never the body (`spec.model_in_body == false`),
+/// so there is no `model` field. Generation options are WRAPPED in the
+/// `inferenceConfig` object named by `spec.wraps_options_in` (`maxTokens`,
+/// `stopSequences`, `temperature`, `top_p` — wire keys from the generated
+/// option table). Root extras (ADR-029 THK-003, none here) still merge into the
+/// true body root, never the wrapper.
+fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+    const spec = providers.spec(cfg.provider);
+    var body = json.object();
+
+    // System (when present): a top-level `system` array of `{text:...}` blocks
+    // (Converse), not Anthropic's bare `system` string.
+    if (cfg.system) |sys|
+        try json.set(arena, &body, "system", try textParts(arena, sys));
+
+    // User turn: `content` is an ARRAY of `{text:...}` blocks, not a bare string.
+    var messages = json.array(arena);
+    var turn = json.object();
+    try json.set(arena, &turn, "role", .{ .string = "user" });
+    try json.set(arena, &turn, "content", try textParts(arena, cfg.prompt));
+    try messages.array.append(turn);
+    try json.set(arena, &body, "messages", messages);
+
+    // Options nest in the `inferenceConfig` wrapper (opts_target = &wrapper);
+    // root extras still merge into the true body root. Attach the wrapper only
+    // when it holds at least one option — mirrors the Google shape's guard.
+    var wrapper = json.object();
+    try applyOptions(arena, &wrapper, &body, cfg);
+    if (wrapper.object.count() > 0)
+        try json.set(arena, &body, spec.wraps_options_in, wrapper);
+
+    // No `model` field: Bedrock puts the model in the URL (spec.model_in_body).
+    return body;
+}
+
+/// A `[{"text": <s>}]` array — the shared text-block container for the Google
+/// shape (a content turn and a `system_instruction`) and the Bedrock Converse
+/// shape (a `content` array and a `system` array).
 fn textParts(arena: std.mem.Allocator, text: []const u8) !json.Value {
     var parts = json.array(arena);
     var part = json.object();
