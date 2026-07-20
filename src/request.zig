@@ -22,6 +22,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const parts = @import("parts.zig");
+const schema_mod = @import("schema.zig");
 const providers = @import("providers/generated/providers.zig");
 const options = @import("providers/generated/options.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
@@ -48,6 +49,11 @@ pub const ChatConfig = struct {
     seed: ?i64 = null,
     stop_sequences: ?[]const []const u8 = null,
     thinking_budget: ?i64 = null,
+    /// Structured JSON-schema output (BUG-007), supplied as a JSON Schema
+    /// STRING. When set, the request builder parses it, applies the provider's
+    /// strict/strip transform, and places it per the generated structured-output
+    /// def (`schema.zig`). Null keeps the plain (no-schema) wire shape.
+    schema: ?[]const u8 = null,
 };
 
 pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
@@ -60,15 +66,22 @@ pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
 /// options, no `model` in body); other shapes still reject.
 pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
-    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI"))
-        return buildOpenAIBody(arena, cfg);
-    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatAnthropic"))
-        return buildAnthropicBody(arena, cfg);
-    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatGoogle"))
-        return buildGoogleBody(arena, cfg);
-    if (std.mem.eql(u8, spec.chat_wire_shape, "ChatBedrock"))
-        return buildBedrockBody(arena, cfg);
-    return error.UnsupportedWireShape;
+    var body = if (std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI"))
+        try buildOpenAIBody(arena, cfg)
+    else if (std.mem.eql(u8, spec.chat_wire_shape, "ChatAnthropic"))
+        try buildAnthropicBody(arena, cfg)
+    else if (std.mem.eql(u8, spec.chat_wire_shape, "ChatGoogle"))
+        try buildGoogleBody(arena, cfg)
+    else if (std.mem.eql(u8, spec.chat_wire_shape, "ChatBedrock"))
+        try buildBedrockBody(arena, cfg)
+    else
+        return error.UnsupportedWireShape;
+
+    // Structured output (BUG-007): parse the schema, apply the per-provider
+    // strict/strip transform, and place it per the generated def — a post-step
+    // on the built body, exactly as Go/Rust apply it. No-op when unset.
+    if (cfg.schema) |s| try schema_mod.apply(arena, &body, cfg.provider, s);
+    return body;
 }
 
 /// One HTTP request header name/value pair produced by the pure header seam.
@@ -97,6 +110,18 @@ pub fn buildRequestHeaders(arena: std.mem.Allocator, cfg: ChatConfig) ![]Header 
 
     if (spec.required_header.len > 0)
         try list.append(arena, .{ .name = spec.required_header, .value = spec.required_header_value });
+
+    // Structured-output beta (Anthropic `structured-outputs-2025-11-13`),
+    // selected by the provider's structured-output FACT — never a name switch.
+    // Composed FIRST so a co-occurring file reference (below) appends ONTO it,
+    // yielding `structured-outputs-...,files-api-...` — the order the
+    // anthropic-schema-document.headers.json golden locks.
+    if (cfg.schema) |_| {
+        if (request_defs.structuredOutput(cfg.provider)) |so| {
+            if (so.beta_header.len > 0)
+                try appendBeta(arena, &list, so.beta_header);
+        }
+    }
 
     // BUG-017: a text request that references an uploaded file emits a
     // `document`/`file` block the Messages API rejects unless the same
