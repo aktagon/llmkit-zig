@@ -164,7 +164,7 @@ pub const Text = struct {
     }
 
     /// Build the request body for this configuration. Returns a Value backed by
-    /// `arena`. Phase 0 does no HTTP send.
+    /// `arena`. Phase 0/1 do no HTTP send.
     pub fn buildBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
         return request.buildChatBody(arena, .{
             .provider = self.provider,
@@ -174,6 +174,13 @@ pub const Text = struct {
             .max_tokens = self.max_tokens_,
             .temperature = self.temperature_,
             .top_p = self.top_p_,
+            .top_k = self.top_k_,
+            .frequency_penalty = self.frequency_penalty_,
+            .presence_penalty = self.presence_penalty_,
+            .reasoning_effort = self.reasoning_effort_,
+            .seed = self.seed_,
+            .stop_sequences = self.stop_sequences_,
+            .thinking_budget = self.thinking_budget_,
         });
     }
 };
