@@ -24,6 +24,7 @@ const json = @import("json.zig");
 const parts = @import("parts.zig");
 const providers = @import("providers/generated/providers.zig");
 const options = @import("providers/generated/options.zig");
+const request_defs = @import("providers/generated/request_defs.zig");
 
 /// A non-text input Part on the ChatCompletion text path (ADR-060), re-exported
 /// from `parts.zig` where the per-provider serialization lives.
@@ -68,6 +69,84 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
     if (std.mem.eql(u8, spec.chat_wire_shape, "ChatBedrock"))
         return buildBedrockBody(arena, cfg);
     return error.UnsupportedWireShape;
+}
+
+/// One HTTP request header name/value pair produced by the pure header seam.
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// Build the request headers for `cfg` — the pure, I/O-free counterpart to
+/// `buildChatBody`. Returns an arena-backed slice of name/value pairs.
+///
+/// Scope (Slice F): the provider's required header (Anthropic ->
+/// `anthropic-version: 2023-06-01`) plus, when the request references an
+/// uploaded FILE Part (BUG-017), the file-reference beta header (Anthropic ->
+/// `anthropic-beta: files-api-2025-04-14`) selected from the generated
+/// `fileUploadConfig` def by the provider's file-upload FACT — never a
+/// provider-name switch. The `anthropic-beta` value is composed through
+/// `appendBeta`, so the structured-output beta (a later slice) can compose onto
+/// the same header comma-separated rather than overwriting it. Mirrors Rust
+/// `build_request`'s header assembly (`build_auth_headers` + the file-beta
+/// block) minus the auth header, which needs the api key the pure wire path
+/// does not carry (the wire golden asserts only `anthropic-beta`).
+pub fn buildRequestHeaders(arena: std.mem.Allocator, cfg: ChatConfig) ![]Header {
+    const spec = providers.spec(cfg.provider);
+    var list: std.ArrayList(Header) = .empty;
+
+    if (spec.required_header.len > 0)
+        try list.append(arena, .{ .name = spec.required_header, .value = spec.required_header_value });
+
+    // BUG-017: a text request that references an uploaded file emits a
+    // `document`/`file` block the Messages API rejects unless the same
+    // file-upload beta the upload path sends rides along. The def is selected by
+    // the provider's `fileUploadConfig` fact (wire shape), not a name switch.
+    if (hasFilePart(cfg.media)) {
+        if (request_defs.fileUploadConfig(cfg.provider)) |upload| {
+            if (upload.beta_header.len > 0)
+                try appendBeta(arena, &list, upload.beta_header);
+        }
+    }
+
+    return list.toOwnedSlice(arena);
+}
+
+/// True when any media Part is an uploaded-file reference (the BUG-017 trigger).
+fn hasFilePart(media: []const MediaPart) bool {
+    for (media) |part| switch (part) {
+        .file => return true,
+        else => {},
+    };
+    return false;
+}
+
+/// Composes `add` into the header list's `anthropic-beta` value — the shared
+/// beta-composition seam. Finds an existing `anthropic-beta` header and
+/// comma-joins `add` (deduped, skipped when already present), or pushes a fresh
+/// one. The structured-output slice will call this same path so the two betas
+/// compose into one header instead of overwriting. Mirrors Rust `append_beta`
+/// plus the find-or-push in `build_request`.
+fn appendBeta(arena: std.mem.Allocator, list: *std.ArrayList(Header), add: []const u8) !void {
+    if (add.len == 0) return;
+    for (list.items) |*h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "anthropic-beta")) {
+            h.value = try composeBeta(arena, h.value, add);
+            return;
+        }
+    }
+    try list.append(arena, .{ .name = "anthropic-beta", .value = add });
+}
+
+/// Comma-joins `add` onto `existing`, deduping an already-present flag (never
+/// overwriting) — the pure string half of `appendBeta`.
+fn composeBeta(arena: std.mem.Allocator, existing: []const u8, add: []const u8) ![]const u8 {
+    if (existing.len == 0) return add;
+    var it = std.mem.splitScalar(u8, existing, ',');
+    while (it.next()) |flag| {
+        if (std.mem.eql(u8, std.mem.trim(u8, flag, " "), add)) return existing;
+    }
+    return std.fmt.allocPrint(arena, "{s},{s}", .{ existing, add });
 }
 
 /// The `ChatOpenAI` wire shape: the system prompt (when present) is a leading
