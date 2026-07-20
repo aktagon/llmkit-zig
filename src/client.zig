@@ -193,10 +193,14 @@ pub const Text = struct {
         return s;
     }
 
-    /// Build the request body for this configuration. Returns a Value backed by
-    /// `arena`. Phase 0/1 do no HTTP send.
-    pub fn buildBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
-        return request.buildChatBody(arena, .{
+    /// The typed request config this builder describes. Constructed inline at
+    /// each terminal (not returned from a helper): `media` slices into `self`'s
+    /// inline `media_` array, so it is only valid while THIS `self` is alive —
+    /// returning it from a helper would dangle the slice into that helper's
+    /// dead `self` copy. Both terminals below therefore build it in-place, where
+    /// `self` outlives the inner call that reads it.
+    inline fn chatConfig(self: *const Text, prompt: []const u8) request.ChatConfig {
+        return .{
             .provider = self.provider,
             .model = self.model_,
             .system = self.system_,
@@ -212,7 +216,21 @@ pub const Text = struct {
             .seed = self.seed_,
             .stop_sequences = self.stop_sequences_,
             .thinking_budget = self.thinking_budget_,
-        });
+        };
+    }
+
+    /// Build the request body for this configuration. Returns a Value backed by
+    /// `arena`. Phase 0/1 do no HTTP send.
+    pub fn buildBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
+        return request.buildChatBody(arena, self.chatConfig(prompt));
+    }
+
+    /// Build the contract-bearing request headers for this configuration
+    /// (Slice F): the provider's required header plus, when a file Part is
+    /// referenced, the file-reference `anthropic-beta` (BUG-017). Returns an
+    /// arena-backed slice. Pure — no HTTP send, no auth header (needs the key).
+    pub fn buildHeaders(self: Text, arena: std.mem.Allocator, prompt: []const u8) ![]request.Header {
+        return request.buildRequestHeaders(arena, self.chatConfig(prompt));
     }
 };
 
