@@ -26,12 +26,19 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     const test_step = b.step("test", "Run the unit + wire-driver tests");
+    const wire_request_step = b.step(
+        "wire-request",
+        "Run the request-wire driver and drop target/wire/request/<fixture>/zig.json artifacts",
+    );
 
     // In-module unit tests (src/*.zig).
     const mod_tests = b.addTest(.{ .root_module = llmkit_mod });
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
 
     // Standalone test drivers under tests/ — each sees the `llmkit` module.
+    // "wire-request" runs only the request-wire driver (mirrors the other
+    // SDKs' filtered `--filter RequestWireTests`-style Makefile line) so
+    // `make test-request-wire` need not run the full unit-test suite.
     for ([_][]const u8{
         "tests/request_wire_test.zig",
     }) |driver| {
@@ -42,6 +49,8 @@ pub fn build(b: *std.Build) void {
         });
         driver_mod.addImport("llmkit", llmkit_mod);
         const driver_tests = b.addTest(.{ .root_module = driver_mod });
-        test_step.dependOn(&b.addRunArtifact(driver_tests).step);
+        const run_driver = b.addRunArtifact(driver_tests);
+        test_step.dependOn(&run_driver.step);
+        wire_request_step.dependOn(&run_driver.step);
     }
 }
