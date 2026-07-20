@@ -14,6 +14,8 @@ pub const client = @import("client.zig");
 pub const Client = client.Client;
 pub const Text = client.Text;
 pub const ProviderName = providers.ProviderName;
+pub const Protocol = client.Protocol;
+pub const SafetySetting = client.SafetySetting;
 
 
 

@@ -24,12 +24,26 @@ const json = @import("json.zig");
 const parts = @import("parts.zig");
 const schema_mod = @import("schema.zig");
 const providers = @import("providers/generated/providers.zig");
-const options = @import("providers/generated/options.zig");
+const opts = @import("options_apply.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 
 /// A non-text input Part on the ChatCompletion text path (ADR-060), re-exported
 /// from `parts.zig` where the per-provider serialization lives.
 pub const MediaPart = parts.MediaPart;
+
+/// Opt-in chat-protocol selector (ADR-055). `chat` keeps the provider's default
+/// protocol (the first `chat_protocols` entry); `responses` selects OpenAI's
+/// Responses API (the `ChatResponsesOpenAI` wire shape → `/v1/responses`). Maps
+/// to a `ChatWireShape` fact via `protocolWireShape`, never a provider name.
+pub const Protocol = enum { chat, responses };
+
+/// One Google-style safety setting (a `{category, threshold}` pair) emitted at
+/// the top-level `safetySettings` array. A structured option, unlike the flat
+/// generation params — carried as a caller-owned slice on `ChatConfig`.
+pub const SafetySetting = struct {
+    category: []const u8,
+    threshold: []const u8,
+};
 
 pub const ChatConfig = struct {
     provider: providers.ProviderName,
@@ -39,6 +53,12 @@ pub const ChatConfig = struct {
     /// Media Parts (image/file) that precede the prompt text Part in the user
     /// turn, in caller order (ADR-060). Empty keeps the bare-text wire shape.
     media: []const MediaPart = &.{},
+    /// Chat-protocol opt-in (ADR-055). `.chat` keeps the default wire shape;
+    /// `.responses` selects the provider's `ChatResponsesOpenAI` protocol.
+    protocol: Protocol = .chat,
+    /// Google safety settings (top-level `safetySettings` array). Empty keeps
+    /// the body without the field. Emitted only on the Google shape.
+    safety_settings: []const SafetySetting = &.{},
     max_tokens: ?i64 = null,
     temperature: ?f64 = null,
     top_p: ?f64 = null,
@@ -66,13 +86,21 @@ pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
 /// options, no `model` in body); other shapes still reject.
 pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
-    var body = if (std.mem.eql(u8, spec.chat_wire_shape, "ChatOpenAI"))
+    // Resolve the EFFECTIVE wire shape: the default is the flat `chat_wire_shape`
+    // (the first `chat_protocols` entry); a `.responses` opt-in selects the
+    // `chat_protocols` entry whose wire_shape is `ChatResponsesOpenAI` — matched
+    // by fact, never a provider name (ADR-055, mirrors Go `resolveChatProtocol`
+    // / Rust `resolve_chat_protocol`).
+    const shape = try resolveWireShape(spec, cfg.protocol);
+    var body = if (std.mem.eql(u8, shape, "ChatOpenAI"))
         try buildOpenAIBody(arena, cfg)
-    else if (std.mem.eql(u8, spec.chat_wire_shape, "ChatAnthropic"))
+    else if (std.mem.eql(u8, shape, "ChatResponsesOpenAI"))
+        try buildResponsesBody(arena, cfg)
+    else if (std.mem.eql(u8, shape, "ChatAnthropic"))
         try buildAnthropicBody(arena, cfg)
-    else if (std.mem.eql(u8, spec.chat_wire_shape, "ChatGoogle"))
+    else if (std.mem.eql(u8, shape, "ChatGoogle"))
         try buildGoogleBody(arena, cfg)
-    else if (std.mem.eql(u8, spec.chat_wire_shape, "ChatBedrock"))
+    else if (std.mem.eql(u8, shape, "ChatBedrock"))
         try buildBedrockBody(arena, cfg)
     else
         return error.UnsupportedWireShape;
@@ -174,12 +202,34 @@ fn composeBeta(arena: std.mem.Allocator, existing: []const u8, add: []const u8) 
     return std.fmt.allocPrint(arena, "{s},{s}", .{ existing, add });
 }
 
-/// The `ChatOpenAI` wire shape: the system prompt (when present) is a leading
-/// `{role:"system", content:...}` message inside `messages`.
-fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
-    var body = json.object();
-    if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
+/// Maps a `Protocol` opt-in to its `ChatWireShape` local name — the fact the
+/// effective-shape resolver matches on. `.chat` returns "" (keep the default).
+fn protocolWireShape(protocol: Protocol) []const u8 {
+    return switch (protocol) {
+        .chat => "",
+        .responses => "ChatResponsesOpenAI",
+    };
+}
 
+/// Resolves the effective chat wire shape for `protocol`: the default
+/// (`spec.chat_wire_shape`) when `.chat`, otherwise the `chat_protocols` entry
+/// whose wire_shape matches the protocol's fact. A protocol the provider does
+/// not expose rejects with `UnsupportedWireShape` (the loud opt-in error;
+/// mirrors Go/Rust `resolve_chat_protocol`).
+fn resolveWireShape(spec: providers.ProviderSpec, protocol: Protocol) BuildError![]const u8 {
+    const want = protocolWireShape(protocol);
+    if (want.len == 0) return spec.chat_wire_shape;
+    for (spec.chat_protocols) |cp| {
+        if (std.mem.eql(u8, cp.wire_shape, want)) return cp.wire_shape;
+    }
+    return error.UnsupportedWireShape;
+}
+
+/// The shared flat `[{role, content}]` message array used by both the Chat
+/// Completions (`messages`) and Responses (`input`) envelopes: a leading
+/// `{role:"system", content:...}` message when a system prompt is set, then the
+/// user turn (with any media Parts). Mirrors Go `buildFlatMessageArray`.
+fn flatMessages(arena: std.mem.Allocator, cfg: ChatConfig) !json.Value {
     var messages = json.array(arena);
     if (cfg.system) |sys| {
         var sm = json.object();
@@ -191,10 +241,41 @@ fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
     try json.set(arena, &um, "role", .{ .string = "user" });
     try json.set(arena, &um, "content", try parts.openAIUserContent(arena, cfg.media, cfg.prompt));
     try messages.array.append(um);
-    try json.set(arena, &body, "messages", messages);
+    return messages;
+}
+
+/// The `ChatOpenAI` wire shape: the system prompt (when present) is a leading
+/// `{role:"system", content:...}` message inside `messages`.
+fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+    var body = json.object();
+    if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
+    try json.set(arena, &body, "messages", try flatMessages(arena, cfg));
 
     // Options and root extras both land on `body` (no wrapper): opts_target == root.
     try applyOptions(arena, &body, &body, cfg);
+    return body;
+}
+
+/// The `ChatResponsesOpenAI` wire shape (ADR-055): the SAME flat message array
+/// as `ChatOpenAI`, but under the `input` key (not `messages`), and the
+/// output-token cap renamed `max_tokens` -> `max_output_tokens` (the Responses
+/// API rejects `max_tokens` with a 400). Every other field is shared with the
+/// Chat Completions shape. The rename is keyed on THIS wire shape, never a
+/// provider name — mirrors the Go/Rust post-build fixup.
+fn buildResponsesBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+    var body = json.object();
+    if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
+    try json.set(arena, &body, "input", try flatMessages(arena, cfg));
+
+    // Options land flat on `body` (no wrapper), exactly as the ChatOpenAI shape.
+    try applyOptions(arena, &body, &body, cfg);
+
+    // Responses names the cap `max_output_tokens`; rename in place (value-equal
+    // to the golden, order-independent).
+    if (body.object.get("max_tokens")) |v| {
+        try json.set(arena, &body, "max_output_tokens", v);
+        _ = body.object.swapRemove("max_tokens");
+    }
     return body;
 }
 
@@ -255,6 +336,21 @@ fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
     try applyOptions(arena, &wrapper, &body, cfg);
     if (wrapper.object.count() > 0)
         try json.set(arena, &body, spec.wraps_options_in, wrapper);
+
+    // Google safety settings (ADR-024 wire path): a TOP-LEVEL `safetySettings`
+    // array of `{category, threshold}` objects — NOT inside `generationConfig`.
+    // Gated on the generated `safety_settings_wire_path` fact (non-empty only
+    // for Google) AND the field being set — no provider-name switch.
+    if (spec.safety_settings_wire_path.len > 0 and cfg.safety_settings.len > 0) {
+        var arr = json.array(arena);
+        for (cfg.safety_settings) |s| {
+            var obj = json.object();
+            try json.set(arena, &obj, "category", .{ .string = s.category });
+            try json.set(arena, &obj, "threshold", .{ .string = s.threshold });
+            try arr.array.append(obj);
+        }
+        try json.set(arena, &body, spec.safety_settings_wire_path, arr);
+    }
 
     return body;
 }
@@ -328,11 +424,11 @@ fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.
     var root_extras = json.object();
 
     if (cfg.temperature) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .temperature, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .temperature, .{ .float = v });
     if (cfg.top_p) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_p, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_p, .{ .float = v });
     if (cfg.top_k) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_k, .{ .integer = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_k, .{ .integer = v });
     // Effective max_tokens defaults to the provider's `default_max_tokens`
     // (mirrors Rust's `options.max_tokens.unwrap_or(config.default_max_tokens)`):
     // a user who never called `.maxTokens(...)` still emits the provider default,
@@ -340,134 +436,22 @@ fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.
     // placement apply to the defaulted value). Emit only when > 0.
     const max_tokens = cfg.max_tokens orelse providers.spec(cfg.provider).default_max_tokens;
     if (max_tokens > 0)
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = max_tokens });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = max_tokens });
     if (cfg.seed) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .seed, .{ .integer = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .seed, .{ .integer = v });
     if (cfg.frequency_penalty) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .frequency_penalty, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .frequency_penalty, .{ .float = v });
     if (cfg.presence_penalty) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .presence_penalty, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .presence_penalty, .{ .float = v });
     if (cfg.thinking_budget) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .thinking_budget, .{ .integer = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .thinking_budget, .{ .integer = v });
     if (cfg.reasoning_effort) |v|
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .reasoning_effort, .{ .string = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .reasoning_effort, .{ .string = v });
     if (cfg.stop_sequences) |ss| {
         var arr = json.array(arena);
         for (ss) |s| try arr.array.append(.{ .string = s });
-        try maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .stop_sequences, arr);
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .stop_sequences, arr);
     }
 
     try json.mergeRoot(arena, root, root_extras);
-}
-
-/// Resolves `key`'s wire path for `provider`/`model`: a per-model override
-/// (ADR-024, longest matching pattern-prefix wins, an exact `id` match wins
-/// outright) takes precedence over the provider's default `supportedOptions`
-/// binding. Returns `null` when the provider does not support `key` at all —
-/// the caller must silently drop the option rather than send an unsupported
-/// key.
-fn resolveOptionKey(provider: providers.ProviderName, model: []const u8, key: options.OptionKey) ?[]const u8 {
-    var best_key: ?[]const u8 = null;
-    var best_len: isize = -1;
-    for (options.modelOptionOverrides(provider)) |ov| {
-        if (ov.key != key) continue;
-        if (std.mem.eql(u8, ov.matcher_kind, "id")) {
-            if (std.mem.eql(u8, ov.matcher_value, model)) return ov.json_key;
-        } else {
-            const prefix = if (std.mem.endsWith(u8, ov.matcher_value, "*"))
-                ov.matcher_value[0 .. ov.matcher_value.len - 1]
-            else
-                ov.matcher_value;
-            const prefix_len: isize = @intCast(prefix.len);
-            if (std.mem.startsWith(u8, model, prefix) and prefix_len > best_len) {
-                best_key = ov.json_key;
-                best_len = prefix_len;
-            }
-        }
-    }
-    if (best_len >= 0) return best_key;
-    for (options.supportedOptions(provider)) |opt| {
-        if (opt.key == key) return opt.json_key;
-    }
-    return null;
-}
-
-/// Inserts `value` at `key`'s resolved wire path on `opts_target` (a no-op
-/// when the provider does not support `key`), then folds in the option's
-/// static sibling fields (`extra_fields_json`, merged into the leaf's parent
-/// object on `opts_target`) and root-level fields (`root_extra_fields_json`,
-/// accumulated into `root_extras` for the caller to merge at the true body
-/// root — ADR-029 THK-003). For a wrapped shape `opts_target` is the wrapper,
-/// so sibling extras stay inside it while root extras still escape to the root.
-fn maybeInsert(
-    arena: std.mem.Allocator,
-    opts_target: *json.Value,
-    root_extras: *json.Value,
-    provider: providers.ProviderName,
-    model: []const u8,
-    key: options.OptionKey,
-    value: json.Value,
-) !void {
-    const json_key = resolveOptionKey(provider, model, key) orelse return;
-    try json.setPath(arena, opts_target, json_key, value);
-
-    for (options.optionOverrides(provider)) |ov| {
-        if (ov.key != key) continue;
-        if (ov.extra_fields_json.len > 0) {
-            if (std.json.parseFromSliceLeaky(json.Value, arena, ov.extra_fields_json, .{})) |extras| {
-                try mergeIntoParent(arena, opts_target, json_key, extras);
-            } else |_| {}
-        }
-        if (ov.root_extra_fields_json.len > 0) {
-            if (std.json.parseFromSliceLeaky(json.Value, arena, ov.root_extra_fields_json, .{})) |extras| {
-                try deepMerge(arena, root_extras, extras);
-            } else |_| {}
-        }
-    }
-}
-
-/// Merges every top-level key of `extras` into the object CONTAINING the leaf
-/// of dotted `path` — e.g. for `"thinking.budget_tokens"` the merge lands in
-/// `body["thinking"]`; for a top-level path, directly in `body`.
-fn mergeIntoParent(arena: std.mem.Allocator, body: *json.Value, path: []const u8, extras: json.Value) !void {
-    if (std.meta.activeTag(extras) != .object) return;
-
-    var parent = body;
-    var it = std.mem.splitScalar(u8, path, '.');
-    while (it.next()) |seg| {
-        if (it.peek() == null) break; // stop before the leaf segment
-        const key = try arena.dupe(u8, seg);
-        const gop = try parent.object.getOrPut(arena, key);
-        if (!gop.found_existing or std.meta.activeTag(gop.value_ptr.*) != .object) {
-            gop.value_ptr.* = json.object();
-        }
-        parent = gop.value_ptr;
-    }
-
-    var eit = extras.object.iterator();
-    while (eit.next()) |entry| {
-        try parent.object.put(arena, try arena.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
-    }
-}
-
-/// Deep-merges `src` into `dst`: when both sides hold an object at the same
-/// key the objects merge recursively, otherwise `src` overwrites. Used for
-/// `root_extra_fields_json` so e.g. `{"thinking":{"type":"adaptive"}}`
-/// composes with an already-present `thinking` object instead of replacing it.
-fn deepMerge(arena: std.mem.Allocator, dst: *json.Value, src: json.Value) !void {
-    if (std.meta.activeTag(src) != .object) return;
-    var it = src.object.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const val = entry.value_ptr.*;
-        if (std.meta.activeTag(val) == .object) {
-            const gop = try dst.object.getOrPut(arena, try arena.dupe(u8, key));
-            if (!gop.found_existing or std.meta.activeTag(gop.value_ptr.*) != .object) {
-                gop.value_ptr.* = json.object();
-            }
-            try deepMerge(arena, gop.value_ptr, val);
-        } else {
-            try dst.object.put(arena, try arena.dupe(u8, key), val);
-        }
-    }
 }
