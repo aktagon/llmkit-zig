@@ -19,6 +19,7 @@ const image_mod = @import("image.zig");
 const speech_mod = @import("speech.zig");
 const transcription_mod = @import("transcription.zig");
 const video_mod = @import("video.zig");
+const models_mod = @import("models.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -41,12 +42,12 @@ const HeaderPair = struct {
 const max_custom_headers = 16;
 
 pub const Client = struct {
-    provider: providers.ProviderName,
+    provider: ProviderName,
     base_url: ?[]const u8 = null,
     custom_headers: [max_custom_headers]HeaderPair = undefined,
     custom_header_count: usize = 0,
 
-    pub fn init(provider: providers.ProviderName) Client {
+    pub fn init(provider: ProviderName) Client {
         return .{ .provider = provider };
     }
 
@@ -100,6 +101,20 @@ pub const Client = struct {
     /// optional image-to-video seed frame). The async poll/wait runtime is a
     /// later slice; the builder's terminal produces the submit body.
     pub fn video(self: Client) video_mod.Video {
+        return .{ .provider = self.provider };
+    }
+
+    /// Enter the model-catalogue builder (ADR-019). `list`/`get` walk the
+    /// compiled-in catalogue; `provider(p)` scopes to one provider's live
+    /// `/models` request-assembly seam. Carries the client's base-URL override.
+    pub fn models(self: Client) models_mod.Models {
+        return .{ .base_url = self.base_url };
+    }
+
+    /// Enter the providers-namespace builder (ADR-019). `list()` returns the
+    /// configured providers that expose a live `/models` endpoint, as
+    /// secret-free `ProviderInfo`.
+    pub fn providers(self: Client) models_mod.Providers {
         return .{ .provider = self.provider };
     }
 };
