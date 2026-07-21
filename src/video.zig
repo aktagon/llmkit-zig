@@ -30,6 +30,8 @@
 //! caller-supplied allocator (pass an arena; free it in one shot).
 
 const std = @import("std");
+const http = @import("http.zig");
+const send = @import("send.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
@@ -64,6 +66,7 @@ const pixverse_aspect_ratio = "16:9";
 /// takes an allocator.
 pub const Video = struct {
     provider: providers.ProviderName,
+    ctx: http.Ctx,
     model_: ?[]const u8 = null,
     output_uri_: ?[]const u8 = null,
     parts_: [max_image_parts]VideoInput = undefined,
@@ -119,7 +122,90 @@ pub const Video = struct {
         // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu.
         return buildSharedBody(arena, self, prompt);
     }
+
+    /// Submit a video-generation job and return the PROVIDER JOB ID.
+    ///
+    /// Video generation is asynchronous everywhere: the submit hop answers with a
+    /// handle, and the finished mp4 arrives only after polling. This terminal is
+    /// the submit hop ONLY. **There is deliberately no `VideoHandle` type and no
+    /// poll/wait here** — video's poll adapter belongs to ADR-062 slice 2, which
+    /// puts video onto the shared `job.zig` engine together with the
+    /// `AsyncJobLifecycle` fact block and the video lifecycle-wire goldens,
+    /// across all seven SDKs. Returning a bare id says exactly what the SDK can
+    /// do today; a handle whose `poll` was unimplemented would claim more than
+    /// that and would then be replaced by slice 2 anyway.
+    ///
+    /// Callers who need the finished asset today poll the provider's own
+    /// `poll_endpoint` with this id.
+    pub fn submit(
+        self: Video,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompt: []const u8,
+    ) ![]const u8 {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.submitWith(self.ctx.transport orelse t.transport(), arena, api_key, prompt);
+    }
+
+    /// `submit` over an injected transport (the seam tests mock).
+    ///
+    /// Bedrock caveat: `VideoBedrock` submits to a SigV4-signed endpoint. This
+    /// terminal composes the ordinary auth headers, so a Bedrock submit is not
+    /// signed and would be rejected live. Signing is `sigv4.zig`'s concern and is
+    /// wired at the chat seam only; the Bedrock BODY is still built and gated by
+    /// the request-wire golden.
+    pub fn submitWith(
+        self: Video,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompt: []const u8,
+    ) ![]const u8 {
+        const cfg = video_gen.videoGenConfig(self.provider) orelse
+            return error.UnsupportedVideoProvider;
+        const body = try self.buildSubmitBody(arena, prompt);
+
+        // Several providers serve video off a DIFFERENT host than chat (MiniMax,
+        // DashScope) — the generated `video_base_url` fact. A client-supplied
+        // base-URL override still wins, since that is the caller pointing the SDK
+        // at a gateway on purpose.
+        var ctx = self.ctx;
+        if (ctx.base_url == null and cfg.video_base_url.len > 0)
+            ctx.base_url = cfg.video_base_url;
+
+        const raw = try send.postJson(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &ctx,
+            .api_key = api_key,
+            .endpoint = try http.substituteModel(arena, cfg.gen_endpoint, self.model_ orelse ""),
+            .op = .video_generation,
+            .model = self.model_ orelse "",
+        }, body);
+
+        return handleIdAt(arena, raw, cfg.submit_handle_field) orelse error.MissingVideoHandle;
+    }
 };
+
+/// Read the submit handle at the config's declared dotted path
+/// (`submit_handle_field`: Bedrock `invocationArn`, Veo `name`, DashScope
+/// `output.task_id`, PixVerse `Resp.video_id`, …) — never a provider-name
+/// switch, and never a hardcoded path.
+///
+/// A numeric leaf is formatted rather than rejected: PixVerse reports the id as
+/// a JSON NUMBER while every other provider reports a string, and normalizing it
+/// here is what the other SDKs did when they generalized this lookup. An id that
+/// is neither string nor number, or an empty string, yields null so the caller
+/// raises rather than handing back an id that cannot be polled.
+fn handleIdAt(arena: std.mem.Allocator, raw: json.Value, path: []const u8) ?[]const u8 {
+    if (path.len == 0) return null;
+    const v = json.getPath(raw, path) orelse return null;
+    return switch (v) {
+        .string => |s| if (s.len == 0) null else s,
+        .integer => |i| std.fmt.allocPrint(arena, "{d}", .{i}) catch null,
+        .number_string => |s| if (s.len == 0) null else s,
+        else => null,
+    };
+}
 
 /// The shared `{model, prompt}` submit body (Grok, Zhipu, Together, MiniMax,
 /// Vidu). An image-to-video seed frame inlines as a `data:<mime>;base64,<b64>`
@@ -216,6 +302,121 @@ fn base64Encode(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
 }
 
 const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunrise";
+
+/// A `Ctx` for the pure-seam tests below. Those tests exercise body/header
+/// construction only, so the transport dependencies are never used — but Zig
+/// has no ambient allocator or `Io`, so they must still be named.
+fn testCtx() http.Ctx {
+    return .{ .gpa = std.testing.allocator, .io = std.testing.io };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

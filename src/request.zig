@@ -20,6 +20,7 @@
 //! bare-text wire shape is preserved byte-for-byte when no media Parts are set.
 
 const std = @import("std");
+const http = @import("http.zig");
 const json = @import("json.zig");
 const parts = @import("parts.zig");
 const schema_mod = @import("schema.zig");
@@ -123,10 +124,9 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
 }
 
 /// One HTTP request header name/value pair produced by the pure header seam.
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+/// Aliased to `http.Header` (structurally identical) so a header slice built
+/// here flows straight into the send seam without a re-pack.
+pub const Header = http.Header;
 
 /// Build the request headers for `cfg` — the pure, I/O-free counterpart to
 /// `buildChatBody`. Returns an arena-backed slice of name/value pairs.
