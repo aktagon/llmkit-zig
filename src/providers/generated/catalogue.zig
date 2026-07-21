@@ -1,6 +1,7 @@
 // Code generated — DO NOT EDIT.
 
 
+const std = @import("std");
 const ProviderName = @import("providers.zig").ProviderName;
 const Capability = @import("../../capability.zig").Capability;
 
