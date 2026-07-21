@@ -18,6 +18,7 @@ const batch_mod = @import("batch.zig");
 const image_mod = @import("image.zig");
 const speech_mod = @import("speech.zig");
 const transcription_mod = @import("transcription.zig");
+const video_mod = @import("video.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -92,6 +93,13 @@ pub const Client = struct {
     /// (AssemblyAI async submit) vs multipart (OpenAI sync) is picked by the
     /// terminal per the provider's generated `request_encoding` fact.
     pub fn transcription(self: Client) transcription_mod.Transcription {
+        return .{ .provider = self.provider };
+    }
+
+    /// Enter the VideoGeneration builder (single-turn text-to-video, with an
+    /// optional image-to-video seed frame). The async poll/wait runtime is a
+    /// later slice; the builder's terminal produces the submit body.
+    pub fn video(self: Client) video_mod.Video {
         return .{ .provider = self.provider };
     }
 };
