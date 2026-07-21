@@ -16,6 +16,7 @@ const stream_mod = @import("stream.zig");
 const agent_mod = @import("agent.zig");
 const batch_mod = @import("batch.zig");
 const image_mod = @import("image.zig");
+const speech_mod = @import("speech.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -78,6 +79,11 @@ pub const Client = struct {
 
     /// Enter the ImageGeneration builder (single-turn: text-to-image + edit).
     pub fn image(self: Client) image_mod.Image {
+        return .{ .provider = self.provider };
+    }
+
+    /// Enter the SpeechGeneration builder (single-turn text-to-speech).
+    pub fn speech(self: Client) speech_mod.Speech {
         return .{ .provider = self.provider };
     }
 };
