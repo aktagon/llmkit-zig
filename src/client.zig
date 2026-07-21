@@ -15,6 +15,7 @@ const http = @import("http.zig");
 const stream_mod = @import("stream.zig");
 const agent_mod = @import("agent.zig");
 const batch_mod = @import("batch.zig");
+const image_mod = @import("image.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -72,6 +73,11 @@ pub const Client = struct {
 
     /// Enter the Agent (tool-using ChatCompletion) builder.
     pub fn agent(self: Client) agent_mod.Agent {
+        return .{ .provider = self.provider };
+    }
+
+    /// Enter the ImageGeneration builder (single-turn: text-to-image + edit).
+    pub fn image(self: Client) image_mod.Image {
         return .{ .provider = self.provider };
     }
 };

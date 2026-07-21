@@ -18,12 +18,16 @@ pub const job = @import("job.zig");
 pub const batch = @import("batch.zig");
 pub const sigv4 = @import("sigv4.zig");
 pub const client = @import("client.zig");
+pub const image = @import("image.zig");
 
 pub const Client = client.Client;
 pub const Text = client.Text;
 pub const Agent = agent.Agent;
 pub const Tool = agent.Tool;
 pub const BatchHandle = batch.BatchHandle;
+pub const Image = image.Image;
+pub const ImageResponse = image.ImageResponse;
+pub const ImageData = image.ImageData;
 pub const ProviderName = providers.ProviderName;
 pub const Protocol = client.Protocol;
 pub const SafetySetting = client.SafetySetting;
