@@ -32,7 +32,6 @@ const http = @import("http.zig");
 const job = @import("job.zig");
 const providers = @import("providers/generated/providers.zig");
 const batch_defs = @import("providers/generated/batch.zig");
-const caching_defs = @import("providers/generated/caching.zig");
 
 const Response = response.Response;
 
@@ -146,7 +145,7 @@ const BatchAdapter = struct {
 
     pub const Out = []Response;
 
-    fn lifecycle(self: BatchAdapter) caching_defs.ResourceLifecycleDef {
+    fn lifecycle(self: BatchAdapter) batch_defs.ResourceLifecycleDef {
         return batch_defs.batchConfig(self.handle.provider).?.lifecycle.?;
     }
 
