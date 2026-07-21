@@ -8,6 +8,7 @@ const std = @import("std");
 
 pub const json = @import("json.zig");
 pub const providers = @import("providers/generated/providers.zig");
+pub const models_parsers = @import("providers/generated/models_parsers.zig");
 pub const request = @import("request.zig");
 pub const response = @import("response.zig");
 pub const http = @import("http.zig");
