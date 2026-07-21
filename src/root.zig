@@ -21,6 +21,7 @@ pub const client = @import("client.zig");
 pub const image = @import("image.zig");
 pub const speech = @import("speech.zig");
 pub const transcription = @import("transcription.zig");
+pub const video = @import("video.zig");
 
 pub const Client = client.Client;
 pub const Text = client.Text;
@@ -36,6 +37,7 @@ pub const AudioData = speech.AudioData;
 pub const Transcription = transcription.Transcription;
 pub const TranscriptionResponse = transcription.TranscriptionResponse;
 pub const TranscriptSegment = transcription.TranscriptSegment;
+pub const Video = video.Video;
 pub const ProviderName = providers.ProviderName;
 pub const Protocol = client.Protocol;
 pub const SafetySetting = client.SafetySetting;
