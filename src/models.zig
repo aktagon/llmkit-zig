@@ -75,51 +75,14 @@ pub const CatalogueRequest = struct {
 
 // === URL / header assembly seam (mirrors rust/src/models.rs) ===
 
-/// Minimal percent-encoder for the cursor / query-key use case. RFC-3986
-/// unreserved characters pass through; everything else is `%XX`. Matches Rust's
-/// `urlencode` so the cross-SDK catalogue-URL bytes agree.
-fn urlencode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
-    const hexdig = "0123456789ABCDEF";
-    var out: std.ArrayList(u8) = .empty;
-    for (s) |ch| {
-        switch (ch) {
-            'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try out.append(arena, ch),
-            else => {
-                try out.append(arena, '%');
-                try out.append(arena, hexdig[ch >> 4]);
-                try out.append(arena, hexdig[ch & 0x0F]);
-            },
-        }
-    }
-    return out.toOwnedSlice(arena);
-}
-
-/// Build the base catalogue URL (`base_url` + `endpoint`), splicing the
-/// QueryParamKey `?key=` for query-auth providers (Google). Bearer / header /
-/// SigV4 providers carry the key elsewhere, so the URL is left bare. The `?key=`
-/// goes on FIRST (before any pagination cursor) so `?key=...&<cursor>=...`
-/// matches the other SDKs' assembly order (CR-003).
-fn buildCatalogueUrl(
-    arena: std.mem.Allocator,
-    provider: providers.ProviderName,
-    base_url_override: ?[]const u8,
-    api_key: []const u8,
-    endpoint: []const u8,
-) ![]const u8 {
-    const spec = providers.spec(provider);
-    const base = base_url_override orelse spec.base_url;
-    const full = try std.fmt.allocPrint(arena, "{s}{s}", .{ base, endpoint });
-    if (request_defs.authScheme(provider) == .query_param_key) {
-        const sep: u8 = if (std.mem.indexOfScalar(u8, full, '?') != null) '&' else '?';
-        return std.fmt.allocPrint(arena, "{s}{c}{s}={s}", .{
-            full,
-            sep,
-            spec.auth_query_param,
-            try urlencode(arena, api_key),
-        });
-    }
-    return full;
-}
+/// The percent-encoder and the base-URL + `?key=` assembly both live in
+/// `http.zig` now: the send terminals (HANDOFF-046) need byte-identical
+/// assembly, and duplicating it here would be the "remember to splice the query
+/// key in N places" rule this project root-fixes to N=1. The `?key=` still goes
+/// on FIRST (before any pagination cursor) so `?key=...&<cursor>=...` matches
+/// the other SDKs' assembly order (CR-003) — `appendCursor` runs after.
+const urlencode = http.urlencode;
+const buildCatalogueUrl = http.buildUrl;
 
 /// Append the pagination cursor to an already-assembled URL, using the cursor
 /// query-param name carried by the generated `catalogueConfig` (ADR-067 Fix A).
@@ -156,7 +119,7 @@ pub fn catalogueListRequest(
     const cfg = catalogue.catalogueConfig(provider) orelse return error.NotSupported;
     const url = try appendCursor(
         arena,
-        try buildCatalogueUrl(arena, provider, base_url_override, api_key, cfg.endpoint),
+        try buildCatalogueUrl(arena, provider, base_url_override, cfg.endpoint, api_key),
         cfg.cursor_param,
         cursor,
     );

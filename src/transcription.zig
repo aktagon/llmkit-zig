@@ -28,6 +28,8 @@
 //! are later slices; this file is the wire-shaped core.
 
 const std = @import("std");
+const http = @import("http.zig");
+const send = @import("send.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const transcription_gen = @import("providers/generated/transcription_gen.zig");
@@ -93,6 +95,7 @@ const boundary_str = "----llmkitZigFormBoundary7MA4YWxkTrZu0gW";
 /// `Text`/`Image`/`Speech` discipline). Only the terminals take an allocator.
 pub const Transcription = struct {
     provider: providers.ProviderName,
+    ctx: http.Ctx,
     model_: ?[]const u8 = null,
 
     /// The transcription model id (ADR-021 bare-noun replacer). Required by the
@@ -135,6 +138,109 @@ pub const Transcription = struct {
         const model_id = self.model_ orelse return error.ModelRequired;
 
         return encodeMultipart(arena, model_id, mime, bytes);
+    }
+
+    /// Transcribe audio bytes SYNCHRONOUSLY and return the transcript
+    /// (`multipart` encoding, OpenAI). `mime` is the audio IANA media type;
+    /// `bytes` is the RAW audio. One round-trip, no polling — the whole reason
+    /// ADR-051 promoted `interaction` to a config fact.
+    ///
+    /// A provider whose generated `request_encoding` is `json` is rejected by
+    /// `buildMultipartBody` with `error.WrongEncoding`: it is the wrong terminal
+    /// for that provider, and `submit` is the right one. The routing therefore
+    /// comes from the config, not from a name check here.
+    pub fn transcribe(
+        self: Transcription,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        mime: []const u8,
+        bytes: []const u8,
+    ) !TranscriptionResponse {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.transcribeWith(self.ctx.transport orelse t.transport(), arena, api_key, mime, bytes);
+    }
+
+    /// `transcribe` over an injected transport (the seam tests mock).
+    ///
+    /// Middleware note: the send seam requires an op and the generated
+    /// `MiddlewareOp` enum has no transcription member, so this fires
+    /// `llm_request`. Go and Rust fire nothing on this path — see the same note
+    ///
+    pub fn transcribeWith(
+        self: Transcription,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        mime: []const u8,
+        bytes: []const u8,
+    ) !TranscriptionResponse {
+        const cfg = transcription_gen.transcriptionConfig(self.provider) orelse
+            return error.UnsupportedTranscriptionProvider;
+        const mp = try self.buildMultipartBody(arena, mime, bytes);
+
+        // The boundary the encoder actually used has to reach the server, or the
+        // form is undecodable — hence `postRaw` with a hand-built content-type
+        // rather than the JSON default.
+        const raw = try send.postRaw(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = cfg.submit_endpoint,
+            .op = .llm_request,
+            .model = self.model_ orelse "",
+        }, mp.body, try std.fmt.allocPrint(arena, "multipart/form-data; boundary={s}", .{mp.boundary}));
+
+        const parsed = std.json.parseFromSliceLeaky(json.Value, arena, raw, .{}) catch
+            return error.InvalidTranscriptionResponse;
+        return parseTranscriptionResponse(arena, self.provider, parsed);
+    }
+
+    /// Submit audio for ASYNCHRONOUS transcription (`json` encoding, AssemblyAI)
+    /// and return the PROVIDER TRANSCRIPT ID, read from the config's declared
+    /// `submit_handle_field`. `audio_url` is a publicly fetchable audio URL.
+    ///
+    /// **Submit only.** The poll adapter that would turn this id into a finished
+    /// transcript is deferred (HANDOFF-046 slice 2): it needs the transcription
+    /// arm of the shared `job.zig` engine plus the AssemblyAI result decode, and
+    /// no cross-SDK lifecycle fixture gates that path yet. A handle type with an
+    /// unimplemented `poll` would advertise more than the SDK can do, so the bare
+    /// id is what is returned. The bytes-upload hop (`upload_endpoint`, for
+    /// callers who have audio but no public URL) is deferred with it.
+    pub fn submit(
+        self: Transcription,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        audio_url: []const u8,
+    ) ![]const u8 {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.submitWith(self.ctx.transport orelse t.transport(), arena, api_key, audio_url);
+    }
+
+    /// `submit` over an injected transport (the seam tests mock).
+    pub fn submitWith(
+        self: Transcription,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        audio_url: []const u8,
+    ) ![]const u8 {
+        const cfg = transcription_gen.transcriptionConfig(self.provider) orelse
+            return error.UnsupportedTranscriptionProvider;
+        const body = try self.buildSubmitBody(arena, audio_url);
+
+        const raw = try send.postJson(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = cfg.submit_endpoint,
+            .op = .llm_request,
+            .model = self.model_ orelse "",
+        }, body);
+
+        const id = json.getPath(raw, cfg.submit_handle_field) orelse
+            return error.MissingTranscriptionHandle;
+        if (id != .string or id.string.len == 0) return error.MissingTranscriptionHandle;
+        return id.string;
     }
 };
 
@@ -274,6 +380,104 @@ fn objGet(v: json.Value, key: []const u8) ?json.Value {
     if (std.meta.activeTag(v) != .object) return null;
     return v.object.get(key);
 }
+
+/// A `Ctx` for the pure-seam tests below. Those tests exercise body/header
+/// construction only, so the transport dependencies are never used — but Zig
+/// has no ambient allocator or `Io`, so they must still be named.
+fn testCtx() http.Ctx {
+    return .{ .gpa = std.testing.allocator, .io = std.testing.io };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -24,6 +24,7 @@ const json = @import("json.zig");
 const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
+const send = @import("send.zig");
 const providers = @import("providers/generated/providers.zig");
 const stream_defs = @import("providers/generated/stream.zig");
 
@@ -154,26 +155,30 @@ fn intAt(value: json.Value, path: []const u8) ?i64 {
 pub fn streamWith(
     transport: http.Transport,
     arena: std.mem.Allocator,
+    ctx: *const http.Ctx,
     cfg: request.ChatConfig,
     api_key: []const u8,
     on_chunk: ?ChunkCallback,
 ) !response.Response {
     const body = try buildStreamBody(arena, cfg);
-    const body_text = try json.stringify(arena, body);
-    const headers = try http.buildAuthHeaders(arena, cfg.provider, api_key);
-
-    const spec = providers.spec(cfg.provider);
-    const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ spec.base_url, spec.endpoint });
-
-    const resp = try transport.send(arena, .{
-        .method = .POST,
-        .url = url,
-        .headers = headers,
-        .body = body_text,
-    });
-
-    return parseSseBuffer(arena, cfg.provider, resp.body, on_chunk);
+    const raw = try send.postRaw(
+        transport,
+        arena,
+        .{
+            .provider = cfg.provider,
+            .ctx = ctx,
+            .api_key = api_key,
+            .endpoint = providers.spec(cfg.provider).endpoint,
+            .extra_headers = try request.buildRequestHeaders(arena, cfg),
+            .op = .llm_request,
+            .model = cfg.model orelse "",
+        },
+        try json.stringify(arena, body),
+        "application/json",
+    );
+    return parseSseBuffer(arena, cfg.provider, raw, on_chunk);
 }
+
 
 
 

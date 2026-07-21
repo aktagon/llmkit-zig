@@ -20,6 +20,7 @@
 const std = @import("std");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
+const middleware = @import("middleware.zig");
 
 pub const Method = enum { GET, POST };
 
@@ -171,6 +172,245 @@ pub fn buildAuthHeaders(arena: std.mem.Allocator, provider: providers.ProviderNa
 
     return list.toOwnedSlice(arena);
 }
+
+/// Fixed capacity for `Client.addHeader` (ADR-052). Client chain methods take
+/// no allocator (ADR-069 ZIG-005), so custom headers live in a bounded array
+/// rather than a heap-allocated list. 16 is generous headroom over every other
+/// SDK's real-world usage; raise it if a caller ever needs more.
+pub const max_custom_headers = 16;
+
+/// Client-scope send context, copied from the `Client` into every builder so a
+/// terminal can reach the network without the caller threading a transport
+/// (HANDOFF-046 DECISION 1a: the transport lives on the Client).
+///
+/// Every field is COPY-SAFE by construction — `gpa` and `io` are values, and
+/// the custom headers live in a bounded ARRAY, not a slice into the Client.
+/// That is load-bearing: builders are immutable value types (each chain method
+/// returns a fresh copy), so a slice pointing into the originating `Client`
+/// would dangle the moment a forked builder outlived it — the same trap
+/// `Text.chatConfig` documents for its inline `media_` array. Read the headers
+/// through `customHeaders()` on a `*const Ctx` that outlives the use.
+///
+/// `HttpTransport` is NOT stored: it is two fields (`gpa`, `io`) and builds a
+/// fresh `std.http.Client` per send anyway, so each terminal constructs one on
+/// its own stack. Storing it would put a `*anyopaque` self-pointer inside a
+/// value type that gets copied — precisely the dangle this struct avoids.
+pub const Ctx = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    base_url: ?[]const u8 = null,
+    custom_headers: [max_custom_headers]Header = undefined,
+    custom_header_count: usize = 0,
+    middleware: [middleware.max_middleware]middleware.Middleware = undefined,
+    middleware_count: usize = 0,
+    /// Transport override. When set, the public terminals send through THIS
+    /// instead of building an `HttpTransport` from `gpa`/`io`.
+    ///
+    /// Without it the public terminals (`prompt`, `generate`, `run`, …) are
+    /// unreachable from a test: each one constructs a real `std.http.Client`, so
+    /// the only network-free path was the `*With` variant — meaning the surface
+    /// users actually call was the one nothing could exercise. That is precisely
+    /// the gap `coverage.public-symbol-untested` exists to catch. Mirrors Go's
+    /// injectable `*http.Client` seam.
+    transport: ?Transport = null,
+
+    /// Return a copy that sends through `t` (the test seam; also a hook for a
+    /// caller with their own transport).
+    pub fn withTransport(self: Ctx, t: Transport) Ctx {
+        var c = self;
+        c.transport = t;
+        return c;
+    }
+
+    /// The custom headers as a slice. Borrows from `self`, so the result is
+    /// valid only while THIS `Ctx` is alive — call it in-place at the terminal.
+    pub fn customHeaders(self: *const Ctx) []const Header {
+        return self.custom_headers[0..self.custom_header_count];
+    }
+
+    /// The middleware hooks as a slice. Borrows from `self` (see above).
+    pub fn middlewares(self: *const Ctx) []const middleware.Middleware {
+        return self.middleware[0..self.middleware_count];
+    }
+
+    /// Record one middleware hook, returning a fresh copy.
+    pub fn withMiddleware(self: Ctx, m: middleware.Middleware) Ctx {
+        var c = self;
+        std.debug.assert(c.middleware_count < middleware.max_middleware);
+        c.middleware[c.middleware_count] = m;
+        c.middleware_count += 1;
+        return c;
+    }
+
+    /// Record one custom header, returning a fresh copy (immutable-builder
+    /// discipline). Asserts on overflow rather than silently dropping.
+    pub fn withHeader(self: Ctx, name: []const u8, value: []const u8) Ctx {
+        var c = self;
+        std.debug.assert(c.custom_header_count < max_custom_headers);
+        c.custom_headers[c.custom_header_count] = .{ .name = name, .value = value };
+        c.custom_header_count += 1;
+        return c;
+    }
+};
+
+/// Minimal percent-encoder for the query-key / cursor use case. RFC-3986
+/// unreserved characters pass through; everything else is `%XX`. Matches Rust's
+/// `urlencode` so the cross-SDK URL bytes agree. Lives here (not in models.zig,
+/// where the catalogue path grew it first) because the send terminals need the
+/// identical assembly — one home, not a "remember to encode in N places" rule.
+pub fn urlencode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    const hexdig = "0123456789ABCDEF";
+    var out: std.ArrayList(u8) = .empty;
+    for (s) |ch| {
+        switch (ch) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try out.append(arena, ch),
+            else => {
+                try out.append(arena, '%');
+                try out.append(arena, hexdig[ch >> 4]);
+                try out.append(arena, hexdig[ch & 0x0F]);
+            },
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// Substitute the `{model}` placeholder a generated endpoint template may carry
+/// (Google `/v1beta/models/{model}:generateContent`, Vertex
+/// `/{model}:predictLongRunning`, Azure's deployment path). A template without
+/// the placeholder is returned unchanged, so every caller can pass its endpoint
+/// through unconditionally rather than testing for the placeholder first.
+///
+/// Lives beside `buildUrl` for the same reason `urlencode` does: three
+/// capabilities (image, video, music) read a `{model}`-bearing endpoint out of
+/// their generated config, and "remember to substitute in N places" is the shape
+/// this project root-fixes into N = 1.
+pub fn substituteModel(arena: std.mem.Allocator, template: []const u8, model_id: []const u8) ![]const u8 {
+    const placeholder = "{model}";
+    const idx = std.mem.indexOf(u8, template, placeholder) orelse return template;
+    return std.fmt.allocPrint(arena, "{s}{s}{s}", .{
+        template[0..idx],
+        model_id,
+        template[idx + placeholder.len ..],
+    });
+}
+
+/// Assemble a send URL: the client's base-URL override (else the provider's
+/// `base_url`) + `endpoint`, with the QueryParamKey `?key=` spliced in for
+/// query-auth providers (Google) — those carry NO auth header, so without this
+/// splice the request would go out unauthenticated. Bearer / header-key / SigV4
+/// providers carry the key elsewhere and get a bare URL.
+///
+/// VULN-001: the returned URL embeds the API key for query-auth providers.
+/// Never put it in an error message or a log line.
+pub fn buildUrl(
+    arena: std.mem.Allocator,
+    provider: providers.ProviderName,
+    base_url_override: ?[]const u8,
+    endpoint: []const u8,
+    api_key: []const u8,
+) ![]const u8 {
+    const base = base_url_override orelse providers.spec(provider).base_url;
+    const full = try std.fmt.allocPrint(arena, "{s}{s}", .{ base, endpoint });
+    if (request_defs.authScheme(provider) != .query_param_key) return full;
+
+    const sep: u8 = if (std.mem.indexOfScalar(u8, full, '?') != null) '&' else '?';
+    return std.fmt.allocPrint(arena, "{s}{c}{s}={s}", .{
+        full,
+        sep,
+        providers.spec(provider).auth_query_param,
+        try urlencode(arena, api_key),
+    });
+}
+
+/// Compose the full outbound header set for one send, in the order the wire
+/// expects: auth (+ the provider's required header) from `buildAuthHeaders`,
+/// then `extra` (the per-request contract headers `request.buildRequestHeaders`
+/// produces — betas and the like), then `content_type` when the request carries
+/// a body, then the client's custom headers.
+///
+/// Names already present are skipped case-insensitively, so `extra`'s duplicate
+/// copy of the required header does not go out twice and a caller's
+/// `addHeader("Authorization", …)` cannot silently shadow the real credential.
+/// Mirrors Swift `applyCustomHeaders` (ADR-052 parity).
+///
+/// Sending `content_type` is not cosmetic: `sigv4.zig` SIGNS `content-type`
+/// whenever the request has one, and the sigv4-wire golden locks
+/// `content-type;host;x-amz-content-sha256;x-amz-date` — a signed-but-unsent
+/// header is the exact live-403 class CR-002 caught in three other SDKs.
+pub fn composeHeaders(
+    arena: std.mem.Allocator,
+    provider: providers.ProviderName,
+    api_key: []const u8,
+    extra: []const Header,
+    content_type: ?[]const u8,
+    custom: []const Header,
+) ![]Header {
+    var list: std.ArrayList(Header) = .empty;
+    try list.appendSlice(arena, try buildAuthHeaders(arena, provider, api_key));
+
+    for (extra) |h| try appendUnlessPresent(arena, &list, h);
+    if (content_type) |ct|
+        try appendUnlessPresent(arena, &list, .{ .name = "content-type", .value = ct });
+    for (custom) |h| try appendUnlessPresent(arena, &list, h);
+
+    return list.toOwnedSlice(arena);
+}
+
+fn appendUnlessPresent(arena: std.mem.Allocator, list: *std.ArrayList(Header), h: Header) !void {
+    for (list.items) |existing|
+        if (std.ascii.eqlIgnoreCase(existing.name, h.name)) return;
+    try list.append(arena, h);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

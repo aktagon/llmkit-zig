@@ -20,6 +20,12 @@ const speech_mod = @import("speech.zig");
 const transcription_mod = @import("transcription.zig");
 const video_mod = @import("video.zig");
 const models_mod = @import("models.zig");
+const music_mod = @import("music.zig");
+const upload_mod = @import("upload.zig");
+const response_mod = @import("response.zig");
+const send = @import("send.zig");
+const capability = @import("capability.zig");
+const middleware = @import("middleware.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -29,86 +35,103 @@ pub const Protocol = request.Protocol;
 /// Google safety setting `{category, threshold}`, re-exported from `request.zig`.
 pub const SafetySetting = request.SafetySetting;
 
-/// One caller-supplied header name/value pair (ADR-052 `addHeader` parity).
-const HeaderPair = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
-/// Fixed capacity for `Client.addHeader` — Client chain methods take no
-/// allocator (ADR-069 ZIG-005), so custom headers live in a bounded array
-/// rather than a heap-allocated list. 16 is generous headroom over every
-/// other SDK's real-world usage; raise it if a caller ever needs more.
-const max_custom_headers = 16;
-
 pub const Client = struct {
     provider: ProviderName,
-    base_url: ?[]const u8 = null,
-    custom_headers: [max_custom_headers]HeaderPair = undefined,
-    custom_header_count: usize = 0,
+    ctx: http.Ctx,
 
-    pub fn init(provider: ProviderName) Client {
-        return .{ .provider = provider };
+    /// Construct a client. `gpa` and `io` are the TRANSPORT dependencies —
+    /// long-lived, so they live on the client (HANDOFF-046 DECISION 1a), while
+    /// per-request memory stays an `arena` the caller passes to each terminal.
+    /// Zig has no ambient allocator or event loop, so these must be explicit
+    /// somewhere; the client is the honest place, and it keeps the terminal
+    /// surface (`prompt(arena, api_key, text)`) aligned with the other six SDKs.
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, provider: ProviderName) Client {
+        return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = io } };
     }
 
     /// Override the provider base URL (e.g. an OpenAI-compat gateway).
     pub fn baseURL(self: Client, url: []const u8) Client {
         var c = self;
-        c.base_url = url;
+        c.ctx.base_url = url;
         return c;
     }
 
     /// Add a custom header sent with every request (ADR-052 parity with the
-    /// other five SDKs' `AddHeader`/`addHeader`/`add_header`). Wiring onto
-    /// the actual HTTP send arrives with the HTTP module in a later phase;
-    /// today this only records the pair on the (still-immutable) builder.
+    /// other six SDKs' `AddHeader`/`addHeader`/`add_header`). Applied by
+    /// `http.composeHeaders` at each send terminal, where a name that would
+    /// collide with the credential or a contract header is skipped.
     pub fn addHeader(self: Client, name: []const u8, value: []const u8) Client {
         var c = self;
-        std.debug.assert(c.custom_header_count < max_custom_headers);
-        c.custom_headers[c.custom_header_count] = .{ .name = name, .value = value };
-        c.custom_header_count += 1;
+        c.ctx = c.ctx.withHeader(name, value);
         return c;
+    }
+
+    /// Attach an observation + veto hook fired around every operation this
+    /// client performs (ADR-020). Calls accumulate. The hook's `ptr` is
+    /// borrowed, so it must outlive the client.
+    pub fn addMiddleware(self: Client, m: middleware.Middleware) Client {
+        var c = self;
+        c.ctx = c.ctx.withMiddleware(m);
+        return c;
+    }
+
+    /// Whether this client's provider supports `cap` (ADR-030). Reads the same
+    /// generated capability facts the strict validation paths use (CAP-002) —
+    /// never a provider-name switch. No I/O.
+    pub fn supports(self: Client, cap: capability.Capability) bool {
+        return capability.providerSupports(self.provider, cap);
     }
 
     /// Enter the ChatCompletion (text) builder.
     pub fn text(self: Client) Text {
-        return .{ .provider = self.provider };
+        return .{ .provider = self.provider, .ctx = self.ctx };
     }
 
     /// Enter the Agent (tool-using ChatCompletion) builder.
     pub fn agent(self: Client) agent_mod.Agent {
-        return .{ .provider = self.provider };
+        return .{ .provider = self.provider, .ctx = self.ctx };
     }
 
     /// Enter the ImageGeneration builder (single-turn: text-to-image + edit).
     pub fn image(self: Client) image_mod.Image {
-        return .{ .provider = self.provider };
+        return .{ .provider = self.provider, .ctx = self.ctx };
+    }
+
+    /// Enter the MusicGeneration builder (single-turn prompt + optional lyrics).
+    pub fn music(self: Client) music_mod.Music {
+        return .{ .provider = self.provider, .ctx = self.ctx };
     }
 
     /// Enter the SpeechGeneration builder (single-turn text-to-speech).
     pub fn speech(self: Client) speech_mod.Speech {
-        return .{ .provider = self.provider };
+        return .{ .provider = self.provider, .ctx = self.ctx };
     }
 
     /// Enter the Transcription builder (single-turn speech-to-text). JSON
     /// (AssemblyAI async submit) vs multipart (OpenAI sync) is picked by the
     /// terminal per the provider's generated `request_encoding` fact.
     pub fn transcription(self: Client) transcription_mod.Transcription {
-        return .{ .provider = self.provider };
+        return .{ .provider = self.provider, .ctx = self.ctx };
     }
 
     /// Enter the VideoGeneration builder (single-turn text-to-video, with an
-    /// optional image-to-video seed frame). The async poll/wait runtime is a
-    /// later slice; the builder's terminal produces the submit body.
+    /// optional image-to-video seed frame). `submit` returns a `VideoHandle`;
+    /// the poll/wait runtime is deferred to ADR-062 slice 2 (see CHANGELOG).
     pub fn video(self: Client) video_mod.Video {
-        return .{ .provider = self.provider };
+        return .{ .provider = self.provider, .ctx = self.ctx };
+    }
+
+    /// Enter the Files API builder (ADR-060). `run` uploads bytes and returns
+    /// the provider file id to attach to a later request via `Text.file(id)`.
+    pub fn upload(self: Client) upload_mod.Upload {
+        return .{ .provider = self.provider, .ctx = self.ctx };
     }
 
     /// Enter the model-catalogue builder (ADR-019). `list`/`get` walk the
     /// compiled-in catalogue; `provider(p)` scopes to one provider's live
     /// `/models` request-assembly seam. Carries the client's base-URL override.
     pub fn models(self: Client) models_mod.Models {
-        return .{ .base_url = self.base_url };
+        return .{ .base_url = self.ctx.base_url };
     }
 
     /// Enter the providers-namespace builder (ADR-019). `list()` returns the
@@ -126,6 +149,7 @@ const max_media_parts = 8;
 
 pub const Text = struct {
     provider: providers.ProviderName,
+    ctx: http.Ctx,
     model_: ?[]const u8 = null,
     system_: ?[]const u8 = null,
     max_tokens_: ?i64 = null,
@@ -302,12 +326,12 @@ pub const Text = struct {
     /// returning it from a helper would dangle the slice into that helper's
     /// dead `self` copy. Both terminals below therefore build it in-place, where
     /// `self` outlives the inner call that reads it.
-    inline fn chatConfig(self: *const Text, prompt: []const u8) request.ChatConfig {
+    inline fn chatConfig(self: *const Text, text_prompt: []const u8) request.ChatConfig {
         return .{
             .provider = self.provider,
             .model = self.model_,
             .system = self.system_,
-            .prompt = prompt,
+            .prompt = text_prompt,
             .media = self.media_[0..self.media_count_],
             .max_tokens = self.max_tokens_,
             .temperature = self.temperature_,
@@ -328,16 +352,16 @@ pub const Text = struct {
 
     /// Build the request body for this configuration. Returns a Value backed by
     /// `arena`. Phase 0/1 do no HTTP send.
-    pub fn buildBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
-        return request.buildChatBody(arena, self.chatConfig(prompt));
+    pub fn buildBody(self: Text, arena: std.mem.Allocator, text_prompt: []const u8) request.BuildError!json.Value {
+        return request.buildChatBody(arena, self.chatConfig(text_prompt));
     }
 
     /// Build the contract-bearing request headers for this configuration
     /// (Slice F): the provider's required header plus, when a file Part is
     /// referenced, the file-reference `anthropic-beta` (BUG-017). Returns an
     /// arena-backed slice. Pure — no HTTP send, no auth header (needs the key).
-    pub fn buildHeaders(self: Text, arena: std.mem.Allocator, prompt: []const u8) ![]request.Header {
-        return request.buildRequestHeaders(arena, self.chatConfig(prompt));
+    pub fn buildHeaders(self: Text, arena: std.mem.Allocator, text_prompt: []const u8) ![]request.Header {
+        return request.buildRequestHeaders(arena, self.chatConfig(text_prompt));
     }
 
     /// Build the BATCH CREATE request body for this configuration (ADR-064 —
@@ -354,25 +378,254 @@ pub const Text = struct {
     /// the chat body + the stream flag +, when the provider opts in (BUG-028),
     /// `stream_options:{include_usage:true}`. Pure — the request-wire golden
     /// asserts these bytes.
-    pub fn buildStreamBody(self: Text, arena: std.mem.Allocator, prompt: []const u8) request.BuildError!json.Value {
-        return stream_mod.buildStreamBody(arena, self.chatConfig(prompt));
+    pub fn buildStreamBody(self: Text, arena: std.mem.Allocator, text_prompt: []const u8) request.BuildError!json.Value {
+        return stream_mod.buildStreamBody(arena, self.chatConfig(text_prompt));
     }
 
-    /// Stream a ChatCompletion over the injected transport (ADR-013). Sends the
-    /// stream request, delivers each text delta to `on_chunk` (may be null), and
-    /// returns the accumulated Response. Production passes an `HttpTransport`;
-    /// tests inject a `MockTransport`. Mirrors Rust `stream` / Go `promptStream`.
+    // === Terminals (HANDOFF-046 slice 1) ===
+    //
+    // Each terminal is COMPOSITION over the seams above — build the body, send
+    // it, parse the reply — never a second implementation of either half. That
+    // is what keeps the request/response wire goldens authoritative: they assert
+    // `buildBody` and `parse*Response`, so a terminal that reuses both cannot
+    // drift from the bytes seven SDKs agree on.
+    //
+    // Every terminal comes in two forms: the public one, which builds an
+    // `HttpTransport` from the client's `gpa`/`io`, and a `*With` variant taking
+    // an explicit `http.Transport` so tests inject a `MockTransport` and drive
+    // the real terminal without a socket.
+
+    /// Send a ChatCompletion and return the normalized Response. `arena` backs
+    /// the request body and everything reachable from the result — free it in
+    /// one shot when done. Mirrors Go `Prompt` / Rust `prompt`.
+    pub fn prompt(
+        self: Text,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        text_prompt: []const u8,
+    ) !response_mod.Response {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.promptWith(self.ctx.transport orelse t.transport(), arena, api_key, text_prompt);
+    }
+
+    /// `prompt` over an injected transport (the seam tests mock).
+    pub fn promptWith(
+        self: Text,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        text_prompt: []const u8,
+    ) !response_mod.Response {
+        const cfg = self.chatConfig(text_prompt);
+        const raw = try send.postJson(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = providers.spec(self.provider).endpoint,
+            .extra_headers = try request.buildRequestHeaders(arena, cfg),
+            .op = .llm_request,
+            .model = self.model_ orelse "",
+        }, try request.buildChatBody(arena, cfg));
+        return response_mod.parseChatResponse(arena, self.provider, raw);
+    }
+
+    /// Stream a ChatCompletion, delivering each text delta to `on_chunk` (may be
+    /// null) and returning the accumulated Response. Mirrors Go `PromptStream` /
+    /// Rust `prompt_stream`.
+    pub fn stream(
+        self: Text,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        text_prompt: []const u8,
+        on_chunk: ?stream_mod.ChunkCallback,
+    ) !response_mod.Response {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.streamWith(self.ctx.transport orelse t.transport(), arena, api_key, text_prompt, on_chunk);
+    }
+
+    /// `stream` over an injected transport (ADR-013). Production passes an
+    /// `HttpTransport`; tests inject a `MockTransport`.
     pub fn streamWith(
         self: Text,
         transport: http.Transport,
         arena: std.mem.Allocator,
         api_key: []const u8,
-        prompt: []const u8,
+        text_prompt: []const u8,
         on_chunk: ?stream_mod.ChunkCallback,
-    ) !@import("response.zig").Response {
-        return stream_mod.streamWith(transport, arena, self.chatConfig(prompt), api_key, on_chunk);
+    ) !response_mod.Response {
+        return stream_mod.streamWith(transport, arena, &self.ctx, self.chatConfig(text_prompt), api_key, on_chunk);
+    }
+
+    /// Submit a batch of prompts as one job and return the handle immediately
+    /// (ADR-064: batch is a Text EXECUTION MODE, parallel to stream — not a
+    /// builder of its own). Poll it with `handle.poll`, or block with
+    /// `handle.wait`. Mirrors Go/Rust `Text.batch`.
+    pub fn batch(
+        self: Text,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompts: []const []const u8,
+    ) !batch_mod.BatchHandle {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.batchWith(self.ctx.transport orelse t.transport(), arena, api_key, prompts);
+    }
+
+    /// `batch` over an injected transport (the seam the lifecycle-wire driver
+    /// already mocks for the poll half).
+    pub fn batchWith(
+        self: Text,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompts: []const []const u8,
+    ) !batch_mod.BatchHandle {
+        const built = try batch_mod.buildBatchBody(arena, self.provider, self.chatConfig(""), prompts);
+        return batch_mod.submitWith(transport, arena, &self.ctx, self.provider, api_key, built);
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// === Public-terminal tests ===
+//
+// These drive the PUBLIC terminals (`prompt`, `batch`, …), not the `*With`
+// variants, by putting a `MockTransport` on the client's `Ctx`. Before that
+// override existed the public surface was untestable without a socket — so the
+// functions users actually call were the ones nothing exercised.
+
+/// Records every event a client fires, and can veto one op.
+const TestHook = struct {
+    ops: std.ArrayList(middleware.MiddlewareOp) = .empty,
+    gpa: std.mem.Allocator,
+    veto: ?middleware.MiddlewareOp = null,
+
+    fn call(ptr: *anyopaque, ev: *const middleware.Event) ?[]const u8 {
+        const self: *TestHook = @ptrCast(@alignCast(ptr));
+        self.ops.append(self.gpa, ev.op) catch {};
+        if (self.veto) |op| if (op == ev.op and ev.phase == .pre) return "vetoed in test";
+        return null;
+    }
+
+    fn hook(self: *TestHook) middleware.Middleware {
+        return .{ .ptr = self, .call_fn = call };
+    }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

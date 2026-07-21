@@ -29,6 +29,7 @@ const json = @import("json.zig");
 const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
+const send = @import("send.zig");
 const job = @import("job.zig");
 const providers = @import("providers/generated/providers.zig");
 const batch_defs = @import("providers/generated/batch.zig");
@@ -130,13 +131,69 @@ pub const BatchHandle = struct {
     transport: http.Transport,
     api_key: []const u8 = "",
     base_url: ?[]const u8 = null,
+    /// Supplies the inter-poll sleep in `wait`. Defaulted so a caller
+    /// reconstructing a handle for cross-process resume (ADR-014) need only
+    /// supply it when it intends to block.
+    io: ?std.Io = null,
 
     /// One poll round-trip (ADR-063 Poll): status -> classify -> (fetch results
     /// on success). Returns the normalized JobStatus.
     pub fn poll(self: BatchHandle, arena: std.mem.Allocator) !job.JobStatus([]Response) {
         return job.pollOnce(BatchAdapter, .{ .handle = self }, arena);
     }
+
+    /// Block until the batch reaches a terminal state (ADR-063 Wait — a thin
+    /// loop over `poll`, not a second lifecycle implementation). Gives up at the
+    /// configured deadline with the typed `error.PollTimeout` sentinel; a
+    /// provider FAILURE is a `JobStatus{.failed}`, not that error.
+    pub fn wait(self: BatchHandle, arena: std.mem.Allocator) !job.JobStatus([]Response) {
+        return job.wait(BatchAdapter, .{ .handle = self }, self.io orelse return error.NoIo, arena);
+    }
 };
+
+/// Submit a built batch CREATE payload and return the handle. The id is read
+/// from the config-declared `response_id_path` — never a provider-name switch.
+/// `built.beta_headers` ride along on the CREATE request (BUG-017: a
+/// file-referencing item 400s without the file-upload beta).
+pub fn submitWith(
+    transport: http.Transport,
+    arena: std.mem.Allocator,
+    ctx: *const http.Ctx,
+    provider: providers.ProviderName,
+    api_key: []const u8,
+    built: BatchBuildResult,
+) !BatchHandle {
+    const lc = (batch_defs.batchConfig(provider) orelse return error.UnsupportedWireShape).lifecycle orelse
+        return error.UnsupportedWireShape;
+
+    var extra: std.ArrayList(http.Header) = .empty;
+    if (built.beta_headers.len > 0)
+        try extra.append(arena, .{
+            .name = "anthropic-beta",
+            .value = try std.mem.join(arena, ",", built.beta_headers),
+        });
+
+    const raw = try send.postJson(transport, arena, .{
+        .provider = provider,
+        .ctx = ctx,
+        .api_key = api_key,
+        .endpoint = lc.create_endpoint,
+        .extra_headers = extra.items,
+        .op = .batch_submit,
+    }, built.payload);
+
+    const id = json.getPath(raw, lc.response_id_path) orelse return error.ApiError;
+    if (id != .string) return error.ApiError;
+
+    return .{
+        .id = try arena.dupe(u8, id.string),
+        .provider = provider,
+        .transport = transport,
+        .api_key = api_key,
+        .base_url = ctx.base_url,
+        .io = ctx.io,
+    };
+}
 
 /// The Job-engine adapter for a batch (the four seams). `Out` is the successful
 /// `Response` slice.

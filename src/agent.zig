@@ -28,6 +28,7 @@ const json = @import("json.zig");
 const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
+const send = @import("send.zig");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 
@@ -51,6 +52,7 @@ const max_tools = 16;
 
 pub const Agent = struct {
     provider: providers.ProviderName,
+    ctx: http.Ctx,
     model_: ?[]const u8 = null,
     system_: ?[]const u8 = null,
     caching_: bool = false,
@@ -109,10 +111,28 @@ pub const Agent = struct {
         return body;
     }
 
-    /// Single-round agent terminal: send the tool-def request over the injected
-    /// transport and return the parsed reply. The multi-turn auto-execution loop
-    /// is deferred (see the module note). Production passes an `HttpTransport`;
-    /// tests inject a `MockTransport`.
+    /// Send the tool-def request and return the parsed reply — ONE round.
+    ///
+    /// The multi-turn auto-execution loop (run the model's chosen tool, feed the
+    /// result back, repeat until it stops asking) is NOT implemented. It is not
+    /// blocked on the send path, which now exists: it needs multi-turn MESSAGE
+    /// support in `request.ChatConfig`, which today carries a single `prompt`.
+    /// Adding a message array means changing `buildChatBody` — the function
+    /// whose exact bytes seven SDKs assert against shared goldens — so it is its
+    /// own slice, not a rider on this one. `Tool.run` is carried on the builder
+    /// and ready for that loop; until then a caller drives tool execution
+    /// themselves from the reply.
+    pub fn chat(
+        self: Agent,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompt: []const u8,
+    ) !response.Response {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.chatWith(self.ctx.transport orelse t.transport(), arena, api_key, prompt);
+    }
+
+    /// `chat` over an injected transport (the seam tests mock).
     pub fn chatWith(
         self: Agent,
         transport: http.Transport,
@@ -121,21 +141,15 @@ pub const Agent = struct {
         prompt: []const u8,
     ) !response.Response {
         const body = try self.buildBody(arena, prompt);
-        const body_text = try json.stringify(arena, body);
-        const headers = try http.buildAuthHeaders(arena, self.provider, api_key);
-
-        const spec = providers.spec(self.provider);
-        const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ spec.base_url, spec.endpoint });
-
-        const resp = try transport.send(arena, .{
-            .method = .POST,
-            .url = url,
-            .headers = headers,
-            .body = body_text,
-        });
-
-        const parsed = try std.json.parseFromSliceLeaky(json.Value, arena, resp.body, .{});
-        return response.parseChatResponse(arena, self.provider, parsed);
+        const raw = try send.postJson(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = providers.spec(self.provider).endpoint,
+            .op = .llm_request,
+            .model = self.model_ orelse "",
+        }, body);
+        return response.parseChatResponse(arena, self.provider, raw);
     }
 };
 
@@ -242,6 +256,14 @@ const wire_tool_schema = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\
 
 fn wireTool() Tool {
     return .{ .name = "get_weather", .description = "Get the current weather for a city.", .schema = wire_tool_schema };
+}
+
+
+/// A `Ctx` for the pure-seam tests below. Those tests exercise body/header
+/// construction only, so the transport dependencies are never used — but Zig
+/// has no ambient allocator or `Io`, so they must still be named.
+fn testCtx() http.Ctx {
+    return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
 
 

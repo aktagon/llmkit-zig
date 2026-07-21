@@ -12,6 +12,11 @@
 //! `[]const Capability` literals whose tags must all exist here.
 
 const std = @import("std");
+const providers = @import("providers/generated/providers.zig");
+const batch_defs = @import("providers/generated/batch.zig");
+const caching_defs = @import("providers/generated/caching.zig");
+const image_defs = @import("providers/generated/image_gen.zig");
+const request_defs = @import("providers/generated/request_defs.zig");
 
 pub const Capability = enum {
     chat_completion,
@@ -29,3 +34,41 @@ pub const Capability = enum {
         return @tagName(self);
     }
 };
+
+/// True iff an explicit request for `cap` will not hard-fail pre-flight on
+/// `provider` (ADR-030, `Client.supports`). Each gated arm dispatches the SAME
+/// generated `*Config` lookup its strict validation path uses (CAP-002), so the
+/// answer cannot drift from the behaviour it predicts; ungated capabilities
+/// return true. Says nothing about per-MODEL rejections — those are
+/// `ModelInfo.capabilities` in the catalogue. Sync, no I/O, infallible.
+pub fn providerSupports(provider: providers.ProviderName, cap: Capability) bool {
+    return switch (cap) {
+        .caching => caching_defs.cachingConfig(provider) != null,
+        .batching => batch_defs.batchConfig(provider) != null,
+        .file_upload => request_defs.fileUploadConfig(provider) != null,
+        .image_generation => image_defs.imageGenConfig(provider) != null,
+        else => true,
+    };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

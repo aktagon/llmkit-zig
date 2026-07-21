@@ -23,6 +23,8 @@
 //! wire-shaped core.
 
 const std = @import("std");
+const http = @import("http.zig");
+const send = @import("send.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const speech_gen = @import("providers/generated/speech_gen.zig");
@@ -58,6 +60,7 @@ pub const ParseError = error{ UnsupportedSpeechProvider, InvalidSpeechResponse }
 /// discipline). Only the terminal (`buildSpeechBody`) takes an allocator.
 pub const Speech = struct {
     provider: providers.ProviderName,
+    ctx: http.Ctx,
     model_: ?[]const u8 = null,
     voice_: ?[]const u8 = null,
 
@@ -90,6 +93,56 @@ pub const Speech = struct {
         if (std.mem.eql(u8, cfg.wire_shape, "SpeechOpenAI"))
             return buildOpenAISpeechBody(arena, self, text);
         return buildInworldSpeechBody(arena, self, text);
+    }
+
+    /// Synthesize `text` and return the decoded clip. Mirrors Go
+    /// `GenerateSpeech` / Rust `generate_speech`.
+    pub fn generate(
+        self: Speech,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        text: []const u8,
+    ) !SpeechResponse {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.generateWith(self.ctx.transport orelse t.transport(), arena, api_key, text);
+    }
+
+    /// `generate` over an injected transport (the seam tests mock).
+    ///
+    /// This terminal uses `postRaw`, not `postJson`, even though the REQUEST is
+    /// JSON: half the speech providers do not answer in JSON. `parseSpeechResponse`
+    /// takes the RAW reply bytes and decides per the generated
+    /// `audio_response_encoding` fact whether they are audio (OpenAI `rawBody`)
+    /// or a base64 envelope to parse (Inworld). Decoding the reply as JSON here
+    /// would fail outright on the `rawBody` shape, so the request is stringified
+    /// by hand and the reply is handed on untouched.
+    ///
+    /// Middleware note: the send seam requires an op, and there is no speech
+    /// member in the generated `MiddlewareOp` enum, so this path fires
+    /// `llm_request`. Go and Rust fire NOTHING for speech — a hook that counts
+    /// `llm_request` events sees one more here than it would in those SDKs. The
+    ///
+    pub fn generateWith(
+        self: Speech,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        text: []const u8,
+    ) !SpeechResponse {
+        const cfg = speech_gen.speechGenConfig(self.provider) orelse
+            return error.UnsupportedSpeechProvider;
+        const body = try self.buildSpeechBody(arena, text);
+
+        const raw = try send.postRaw(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = cfg.gen_endpoint,
+            .op = .llm_request,
+            .model = self.model_ orelse "",
+        }, try json.stringify(arena, body), "application/json");
+
+        return parseSpeechResponse(arena, self.provider, raw);
     }
 };
 
@@ -175,6 +228,69 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
     try dec.decode(buf, b64);
     return buf;
 }
+
+/// A `Ctx` for the pure-seam tests below. Those tests exercise body/header
+/// construction only, so the transport dependencies are never used — but Zig
+/// has no ambient allocator or `Io`, so they must still be named.
+fn testCtx() http.Ctx {
+    return .{ .gpa = std.testing.allocator, .io = std.testing.io };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

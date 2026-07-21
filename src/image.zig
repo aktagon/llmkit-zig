@@ -17,6 +17,8 @@
 //! send, middleware) are later slices; this file is the wire-shaped core.
 
 const std = @import("std");
+const http = @import("http.zig");
+const send = @import("send.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const image_gen = @import("providers/generated/image_gen.zig");
@@ -64,6 +66,7 @@ const max_image_parts = 8;
 /// discipline). Only the terminal (`buildImageBody`) takes an allocator.
 pub const Image = struct {
     provider: providers.ProviderName,
+    ctx: http.Ctx,
     model_: ?[]const u8 = null,
     aspect_ratio_: ?[]const u8 = null,
     image_size_: ?[]const u8 = null,
@@ -160,7 +163,74 @@ pub const Image = struct {
             return buildRecraftGenBody(arena, self, prompt);
         return error.UnsupportedImageProvider;
     }
+
+    /// Generate images and return the decoded payload. Mirrors Go
+    /// `GenerateImage` / Rust `generate_image`: build the body, POST it, project
+    /// the reply — the send seam does URL, headers, middleware and the non-2xx
+    /// check, so this terminal is only the composition.
+    ///
+    /// This is the GENERATION path (`gen_endpoint`). The EDIT path — reference
+    /// images posted as `multipart/form-data` to the config's separate
+    /// `edit_endpoint` — is not wired: `buildImageBody` produces a JSON body for
+    /// every input mode, so a reference image reaches the provider inline
+    /// (Google `inlineData`) rather than as a form part, and there is no
+    /// cross-SDK fixture for the edit form.
+    pub fn generate(
+        self: Image,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompt: []const u8,
+    ) !ImageResponse {
+        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        return self.generateWith(self.ctx.transport orelse t.transport(), arena, api_key, prompt);
+    }
+
+    /// `generate` over an injected transport (the seam tests mock).
+    pub fn generateWith(
+        self: Image,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        prompt: []const u8,
+    ) !ImageResponse {
+        const cfg = image_gen.imageGenConfig(self.provider) orelse
+            return error.UnsupportedImageProvider;
+        const body = try self.buildImageBody(arena, prompt);
+
+        const raw = try send.postJson(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = try imageEndpoint(arena, self.provider, cfg, self.model_ orelse ""),
+            .op = .image_generation,
+            .model = self.model_ orelse "",
+        }, body);
+
+        return parseImageResponse(arena, self.provider, raw);
+    }
 };
+
+/// The image-generation endpoint, with `{model}` substituted.
+///
+/// The generated `gen_endpoint` is the image-specific path when the provider has
+/// one (OpenAI `/v1/images/generations`, Recraft, xAI). It is EMPTY for Google,
+/// whose image generation reuses the chat `generateContent` endpoint — so the
+/// fallback is the provider's own chat endpoint, which is where the model id
+/// lives for that shape (`/v1beta/models/{model}:generateContent`). Reading the
+/// fallback from the provider spec keeps this config-driven: no arm of this
+/// function knows a provider by name.
+fn imageEndpoint(
+    arena: std.mem.Allocator,
+    provider: ProviderName,
+    cfg: image_gen.ImageGenDef,
+    model_id: []const u8,
+) ![]const u8 {
+    const template = if (cfg.gen_endpoint.len > 0)
+        cfg.gen_endpoint
+    else
+        providers.spec(provider).endpoint;
+    return http.substituteModel(arena, template, model_id);
+}
 
 /// The Google `generateContent` image body: `contents:[{parts:[...]}]` (no
 /// `role`, unlike the chat shape), each reference image as `{inlineData:
@@ -395,6 +465,96 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
     try dec.decode(buf, b64);
     return buf;
 }
+
+/// A `Ctx` for the pure-seam tests below. Those tests exercise body/header
+/// construction only, so the transport dependencies are never used — but Zig
+/// has no ambient allocator or `Io`, so they must still be named.
+fn testCtx() http.Ctx {
+    return .{ .gpa = std.testing.allocator, .io = std.testing.io };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
