@@ -24,6 +24,7 @@ pub const speech = @import("speech.zig");
 pub const transcription = @import("transcription.zig");
 pub const video = @import("video.zig");
 pub const models = @import("models.zig");
+pub const telemetry = @import("telemetry.zig");
 
 pub const Client = client.Client;
 pub const Text = client.Text;
@@ -47,6 +48,11 @@ pub const ModelInfo = models.ModelInfo;
 pub const ProviderName = providers.ProviderName;
 pub const Protocol = client.Protocol;
 pub const SafetySetting = client.SafetySetting;
+pub const Telemetry = telemetry.Telemetry;
+pub const Event = telemetry.Event;
+pub const buildOtlpTraces = telemetry.buildOtlpTraces;
+pub const httpExport = telemetry.httpExport;
+pub const setEventError = telemetry.setEventError;
 
 
 
