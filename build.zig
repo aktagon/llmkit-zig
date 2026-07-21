@@ -46,6 +46,10 @@ pub fn build(b: *std.Build) void {
         "wire-catalogue",
         "Run the catalogue-wire driver and drop target/wire/catalogue/<case>/zig.json artifacts",
     );
+    const wire_telemetry_step = b.step(
+        "wire-telemetry",
+        "Run the telemetry-wire driver and drop target/wire/telemetry/<fixture>/zig.json artifacts",
+    );
 
     // In-module unit tests (src/*.zig).
     const mod_tests = b.addTest(.{ .root_module = llmkit_mod });
@@ -62,6 +66,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/lifecycle_wire_test.zig", .wire_step = wire_lifecycle_step },
         .{ .path = "tests/sigv4_wire_test.zig", .wire_step = wire_sigv4_step },
         .{ .path = "tests/catalogue_wire_test.zig", .wire_step = wire_catalogue_step },
+        .{ .path = "tests/telemetry_wire_test.zig", .wire_step = wire_telemetry_step },
     }) |driver| {
         const driver_mod = b.createModule(.{
             .root_source_file = b.path(driver.path),
