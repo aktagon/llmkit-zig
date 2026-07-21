@@ -26,6 +26,7 @@ const std = @import("std");
 const http = @import("http.zig");
 const send = @import("send.zig");
 const json = @import("json.zig");
+const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
 const speech_gen = @import("providers/generated/speech_gen.zig");
 const response = @import("response.zig");
@@ -117,11 +118,10 @@ pub const Speech = struct {
     /// would fail outright on the `rawBody` shape, so the request is stringified
     /// by hand and the reply is handed on untouched.
     ///
-    /// Middleware note: the send seam requires an op, and there is no speech
-    /// member in the generated `MiddlewareOp` enum, so this path fires
-    /// `llm_request`. Go and Rust fire NOTHING for speech — a hook that counts
-    /// `llm_request` events sees one more here than it would in those SDKs. The
+    /// Middleware: the send fires `speech_generation` pre (vetoable) and post
     ///
+    /// label — this path used to report `llm_request` for want of a speech
+    /// member, misreporting TTS as chat.
     pub fn generateWith(
         self: Speech,
         transport: http.Transport,
@@ -138,7 +138,7 @@ pub const Speech = struct {
             .ctx = &self.ctx,
             .api_key = api_key,
             .endpoint = cfg.gen_endpoint,
-            .op = .llm_request,
+            .op = .speech_generation,
             .model = self.model_ orelse "",
         }, try json.stringify(arena, body), "application/json");
 
@@ -301,6 +301,77 @@ fn testCtx() http.Ctx {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// A middleware that records every (op, phase) it is called with. Zig has no
+/// capturing closures, so the recorder's state rides on `ptr` — the same
+/// type-erasure `http.Transport` uses.
+const Recorder = struct {
+    seen: [8]struct { op: middleware.MiddlewareOp, phase: middleware.MiddlewarePhase } = undefined,
+    count: usize = 0,
+
+    fn call(ptr: *anyopaque, ev: *const middleware.Event) ?[]const u8 {
+        const self: *Recorder = @ptrCast(@alignCast(ptr));
+        self.seen[self.count] = .{ .op = ev.op, .phase = ev.phase };
+        self.count += 1;
+        return null;
+    }
+
+    fn hook(self: *Recorder) middleware.Middleware {
+        return .{ .ptr = self, .call_fn = Recorder.call };
+    }
+};
 
 
 
