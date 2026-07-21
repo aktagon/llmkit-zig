@@ -17,6 +17,7 @@ const agent_mod = @import("agent.zig");
 const batch_mod = @import("batch.zig");
 const image_mod = @import("image.zig");
 const speech_mod = @import("speech.zig");
+const transcription_mod = @import("transcription.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -84,6 +85,13 @@ pub const Client = struct {
 
     /// Enter the SpeechGeneration builder (single-turn text-to-speech).
     pub fn speech(self: Client) speech_mod.Speech {
+        return .{ .provider = self.provider };
+    }
+
+    /// Enter the Transcription builder (single-turn speech-to-text). JSON
+    /// (AssemblyAI async submit) vs multipart (OpenAI sync) is picked by the
+    /// terminal per the provider's generated `request_encoding` fact.
+    pub fn transcription(self: Client) transcription_mod.Transcription {
         return .{ .provider = self.provider };
     }
 };
