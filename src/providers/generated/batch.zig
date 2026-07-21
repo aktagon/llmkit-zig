@@ -2,7 +2,7 @@
 
 
 const ProviderName = @import("providers.zig").ProviderName;
-const ResourceLifecycleDef = @import("caching.zig").ResourceLifecycleDef;
+pub const ResourceLifecycleDef = @import("caching.zig").ResourceLifecycleDef;
 
 pub const BatchInputMode = enum {
     inline_requests,
