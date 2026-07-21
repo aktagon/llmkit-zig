@@ -31,6 +31,7 @@ const std = @import("std");
 const http = @import("http.zig");
 const send = @import("send.zig");
 const json = @import("json.zig");
+const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
 const transcription_gen = @import("providers/generated/transcription_gen.zig");
 const response = @import("response.zig");
@@ -162,10 +163,10 @@ pub const Transcription = struct {
 
     /// `transcribe` over an injected transport (the seam tests mock).
     ///
-    /// Middleware note: the send seam requires an op and the generated
-    /// `MiddlewareOp` enum has no transcription member, so this fires
-    /// `llm_request`. Go and Rust fire nothing on this path — see the same note
+    /// Middleware: the send fires `transcription` pre (vetoable) and post
     ///
+    /// to fire `llm_request` for want of a transcription member, misreporting
+    /// STT as chat.
     pub fn transcribeWith(
         self: Transcription,
         transport: http.Transport,
@@ -186,7 +187,7 @@ pub const Transcription = struct {
             .ctx = &self.ctx,
             .api_key = api_key,
             .endpoint = cfg.submit_endpoint,
-            .op = .llm_request,
+            .op = .transcription,
             .model = self.model_ orelse "",
         }, mp.body, try std.fmt.allocPrint(arena, "multipart/form-data; boundary={s}", .{mp.boundary}));
 
@@ -217,6 +218,10 @@ pub const Transcription = struct {
     }
 
     /// `submit` over an injected transport (the seam tests mock).
+    ///
+    /// Middleware: fires `transcription` around the OUTBOUND submit only
+    /// (BUG-036), mirroring `video_generation` / `batch_submit`. Polling a
+    /// submitted job reads state and does not fire.
     pub fn submitWith(
         self: Transcription,
         transport: http.Transport,
@@ -233,7 +238,7 @@ pub const Transcription = struct {
             .ctx = &self.ctx,
             .api_key = api_key,
             .endpoint = cfg.submit_endpoint,
-            .op = .llm_request,
+            .op = .transcription,
             .model = self.model_ orelse "",
         }, body);
 
@@ -469,6 +474,112 @@ fn testCtx() http.Ctx {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// A middleware that records every (op, phase) it is called with. Zig has no
+/// capturing closures, so the recorder's state rides on `ptr` — the same
+/// type-erasure `http.Transport` uses.
+const Recorder = struct {
+    seen: [8]struct { op: middleware.MiddlewareOp, phase: middleware.MiddlewarePhase } = undefined,
+    count: usize = 0,
+
+    fn call(ptr: *anyopaque, ev: *const middleware.Event) ?[]const u8 {
+        const self: *Recorder = @ptrCast(@alignCast(ptr));
+        self.seen[self.count] = .{ .op = ev.op, .phase = ev.phase };
+        self.count += 1;
+        return null;
+    }
+
+    fn hook(self: *Recorder) middleware.Middleware {
+        return .{ .ptr = self, .call_fn = Recorder.call };
+    }
+};
 
 
 

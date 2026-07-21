@@ -19,4 +19,6 @@ pub const MiddlewareOp = enum {
     music_generation,
     video_generation,
     models_list,
+    speech_generation,
+    transcription,
 };
