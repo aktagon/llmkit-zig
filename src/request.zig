@@ -225,8 +225,9 @@ fn protocolWireShape(protocol: Protocol) []const u8 {
 /// (`spec.chat_wire_shape`) when `.chat`, otherwise the `chat_protocols` entry
 /// whose wire_shape matches the protocol's fact. A protocol the provider does
 /// not expose rejects with `UnsupportedWireShape` (the loud opt-in error;
-/// mirrors Go/Rust `resolve_chat_protocol`).
-fn resolveWireShape(spec: providers.ProviderSpec, protocol: Protocol) BuildError![]const u8 {
+/// mirrors Go/Rust `resolve_chat_protocol`). Public because the send path must
+/// hand the SAME effective shape to `response.decodeResponse` (ADR-076 SYM-003).
+pub fn resolveWireShape(spec: providers.ProviderSpec, protocol: Protocol) BuildError![]const u8 {
     const want = protocolWireShape(protocol);
     if (want.len == 0) return spec.chat_wire_shape;
     for (spec.chat_protocols) |cp| {

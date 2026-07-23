@@ -1,4 +1,5 @@
-//! Handwritten ChatCompletion response parser (ADR-065 Track B, Phase 2 slice I).
+//! Handwritten ChatCompletion response CODEC (ADR-065 Track B, Phase 2 slice I;
+//! the inverse leg added by ADR-076).
 //!
 //! The INBOUND mirror of `request.zig`: given a provider's chat REPLY body
 //! (already parsed into the `json.Value` waist), project it to the normalized
@@ -17,6 +18,11 @@
 //!
 //! Strings are duped into the caller's arena, so a `Response` outlives the
 //! parsed body it was read from.
+//!
+//! ADR-076 adds the inverse, `encodeResponse`, over the SAME path facts — the
+//! reader with `json.getPath` replaced by `json.setWirePath`. The pair is
+//! keyless, IO-free and pure, and `decodeResponse` is the single spelling of the
+//! reader (the former `parseChatResponse` is gone, not kept beside it).
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -101,10 +107,42 @@ fn detectError(arena: std.mem.Allocator, raw: json.Value, ps: providers.Provider
     };
 }
 
+/// The error set `encodeResponse` adds to the allocator's. Zig error sets carry
+/// no payload, so — unlike the other six SDKs, whose `ValidationError{Field,
+/// Message}` names the offending field — this reports the KIND and not the
+/// field (ADR-076 §3, the one honest asymmetry). Narrow by construction, the
+/// `request.zig` `BuildError = error{UnsupportedWireShape}` precedent.
+pub const EncodeError = error{FieldNotInvertible} || std.mem.Allocator.Error;
+
 /// Project a parsed provider chat reply into the normalized `Response`. All
 /// field placement is driven by the generated per-provider path facts; nothing
 /// here dispatches on the provider name. Mirrors `rust/src/response.rs`.
-pub fn parseChatResponse(arena: std.mem.Allocator, provider: ProviderName, raw: json.Value) !Response {
+///
+/// `chat_wire_shape` is the EFFECTIVE wire shape for this request (after
+/// `.protocol(...)` resolution, ADR-055): only `ChatResponsesOpenAI` diverges
+/// (the `output[]` envelope); every other value uses the provider's declared
+/// response paths. It is REQUIRED, not derived — one provider can serve two
+/// chat protocols, and inferring it silently mis-parses (ADR-076 SYM-003).
+///
+/// Keyless, IO-free and pure (SYM-002): no `Client`, no credential, no network,
+/// no clock — the subject is the generated `ProviderName`. This is the same
+/// function the chat send path calls (SYM-004).
+///
+/// The body is the parsed `json.Value` waist rather than bytes, matching
+/// `request.buildChatBody`'s Value-typed result on the outbound leg: Zig's pure
+/// wire seam is Value-typed at both ends and the send seam does the
+/// stringify/parse (ADR-069 ZIG-002). `json.parse` / `json.stringify` are public
+/// for a caller holding bytes.
+pub fn decodeResponse(
+    arena: std.mem.Allocator,
+    provider: ProviderName,
+    chat_wire_shape: []const u8,
+    raw: json.Value,
+) !Response {
+    if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) {
+        return parseResponsesEnvelope(arena, raw);
+    }
+
     const ps = providers.spec(provider);
     const usage_paths = response_paths.usagePaths(provider);
     const cache = caching.cacheUsagePaths(provider);
@@ -125,6 +163,187 @@ pub fn parseChatResponse(arena: std.mem.Allocator, provider: ProviderName, raw: 
         },
     };
 }
+
+/// `decodeResponse`'s inverse: render a canonical `Response` back onto the wire
+/// for `provider` + `chat_wire_shape`. Every write location comes from the same
+/// generated path accessors `decodeResponse` reads — there is no second table,
+/// no switch on the provider name and no path literal here (ADR-076 SYM-005).
+///
+/// Keyless, IO-free and pure, like its mirror. The result is NOT byte-identical
+/// to the body a provider would send: a provider body carries fields the
+/// canonical `Response` does not model (ADR-014's raw exists for exactly that).
+/// The contract is the canonical fixed point,
+/// `decode(encode(decode(b))) == decode(b)` (SYM-006).
+///
+/// The returned Value and every string reachable from it are backed by `arena`,
+/// so it outlives the call for as long as the arena does.
+pub fn encodeResponse(
+    arena: std.mem.Allocator,
+    provider: ProviderName,
+    chat_wire_shape: []const u8,
+    resp: Response,
+) EncodeError!json.Value {
+    try guardOneWayFields(provider, resp);
+    if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) {
+        return encodeResponsesEnvelope(arena, resp);
+    }
+
+    const ps = providers.spec(provider);
+    const usage_paths = response_paths.usagePaths(provider);
+    const cache = caching.cacheUsagePaths(provider);
+
+    var raw = json.object();
+    try json.setWirePath(arena, &raw, response_paths.responseTextPath(provider), .{ .string = resp.content });
+    try json.setWirePath(arena, &raw, usage_paths.input, .{ .integer = resp.usage.input });
+    try json.setWirePath(arena, &raw, usage_paths.output, .{ .integer = resp.usage.output });
+    try json.setWirePath(arena, &raw, cache.write, .{ .integer = resp.usage.cache_write });
+    try json.setWirePath(arena, &raw, cache.read, .{ .integer = resp.usage.cache_read });
+    const scale = response_paths.usageCostScale(provider);
+    if (scale != 0) {
+        const cost = resp.usage.cost / scale;
+        try json.setWirePath(arena, &raw, response_paths.usageCostPath(provider), .{ .float = cost });
+    }
+    try json.setWirePath(arena, &raw, ps.reasoning_tokens_path, .{ .integer = resp.usage.reasoning });
+    try json.setWirePath(arena, &raw, ps.finish_reason_path, .{ .string = resp.finish_reason });
+    try json.setWirePath(arena, &raw, ps.finish_message_path, .{ .string = resp.finish_message });
+    // The error envelope is part of the canonical projection Zig's `Response`
+    // carries (`err`), so its two paths are written back like any other — the
+    // mirror of `detectError`.
+    if (resp.err) |e| {
+        try json.setWirePath(arena, &raw, ps.error_message_path, .{ .string = e.message });
+        try json.setWirePath(arena, &raw, ps.error_type_path, .{ .string = e.type });
+    }
+    return raw;
+}
+
+/// Refuses to encode a canonical field whose mapping is `OneWay` for this
+/// provider — the result set of CQ-WMAP-011 (ADR-076 SYM-007). Only one member
+/// is in Phase 2's scope; the other, `exceptGoogleToolCallID`, covers tool
+/// calls, which are out (SYM-008).
+///
+/// An empty value is not an error: there is nothing to write, so the common
+/// path stays usable and only the lying path fails.
+fn guardOneWayFields(provider: ProviderName, resp: Response) EncodeError!void {
+    if (provider == .vertex and resp.finish_reason.len > 0) {
+        // exceptVertexFinishReason, canonical path: response.finish_reason.
+        // The comment carries what the error cannot: a Zig error set has no
+        // payload, so `field` and `message` — which the other six SDKs pass to
+        // ValidationError — live here instead, verbatim from the R-Box's
+        // canonicalPath and invertibilityNote. This is also the anchor
+        //
+        // from; without it the rule would be vacuous for Zig.
+        //
+        // invertibilityNote: Vertex carries no finish-reason field. Its path
+        // reads predictions[0].raiFilteredReason — a safety-filter explanation
+        // surfaced AS the finish reason. Extraction is a deliberate fusion, so
+        // the reverse leg cannot decide whether a given canonical finish_reason
+        // originated as a safety verdict, and writing an ordinary stop signal
+        // into that field would fabricate one.
+        return error.FieldNotInvertible;
+    }
+}
+
+/// Extract text + usage from OpenAI's Responses reply (ADR-055). Unlike Chat
+/// Completions (`choices[].message.content`), the reply is an `output[]` array
+/// whose message item carries `content[]` blocks of type "output_text"; usage is
+/// input_tokens/output_tokens with cached + reasoning sub-details. Hand-coded
+/// per wire shape, symmetric with the `buildResponsesBody` request arm (ADR-028:
+/// behavior held by tests, not by declared response paths).
+fn parseResponsesEnvelope(arena: std.mem.Allocator, raw: json.Value) !Response {
+    return .{
+        .content = try arena.dupe(u8, extractResponsesText(raw)),
+        .finish_reason = try arena.dupe(u8, stringAt(raw, "status")),
+        .usage = .{
+            .input = intAt(raw, "usage.input_tokens"),
+            .output = intAt(raw, "usage.output_tokens"),
+            .cache_read = intAt(raw, "usage.input_tokens_details.cached_tokens"),
+            .reasoning = intAt(raw, "usage.output_tokens_details.reasoning_tokens"),
+        },
+    };
+}
+
+/// Walk the Responses `output[]` array for the first message item and return its
+/// first `output_text` block. Iterating (rather than a fixed
+/// `output[0].content[0]` path) tolerates a leading reasoning item.
+fn extractResponsesText(raw: json.Value) []const u8 {
+    const output = json.getPath(raw, "output") orelse return "";
+    if (std.meta.activeTag(output) != .array) return "";
+    for (output.array.items) |item| {
+        if (!isTagged(item, "message")) continue;
+        const content = json.getPath(item, "content") orelse continue;
+        if (std.meta.activeTag(content) != .array) continue;
+        for (content.array.items) |block| {
+            if (!isTagged(block, "output_text")) continue;
+            const text = json.getPath(block, "text") orelse continue;
+            if (std.meta.activeTag(text) == .string) return text.string;
+        }
+    }
+    return "";
+}
+
+/// Whether `value` is an object whose "type" discriminant equals `want`.
+fn isTagged(value: json.Value, want: []const u8) bool {
+    const tag = json.getPath(value, "type") orelse return false;
+    return std.meta.activeTag(tag) == .string and std.mem.eql(u8, tag.string, want);
+}
+
+/// Mirror of `parseResponsesEnvelope`: rebuild OpenAI's Responses reply — an
+/// `output[]` array whose message item carries `content[]` blocks of type
+/// "output_text". Hand-coded per wire shape on both legs, symmetric with the
+/// reader, for the same reason the reader is.
+fn encodeResponsesEnvelope(arena: std.mem.Allocator, resp: Response) EncodeError!json.Value {
+    var raw = json.object();
+    if (resp.content.len > 0) {
+        var block = json.object();
+        try json.set(arena, &block, "type", .{ .string = "output_text" });
+        try json.set(arena, &block, "text", .{ .string = resp.content });
+        var content = json.array(arena);
+        try content.array.append(block);
+
+        var item = json.object();
+        try json.set(arena, &item, "type", .{ .string = "message" });
+        try json.set(arena, &item, "content", content);
+        var output = json.array(arena);
+        try output.array.append(item);
+        try json.set(arena, &raw, "output", output);
+    }
+    try json.setWirePath(arena, &raw, "usage.input_tokens", .{ .integer = resp.usage.input });
+    try json.setWirePath(arena, &raw, "usage.output_tokens", .{ .integer = resp.usage.output });
+    try json.setWirePath(arena, &raw, "usage.input_tokens_details.cached_tokens", .{ .integer = resp.usage.cache_read });
+    try json.setWirePath(arena, &raw, "usage.output_tokens_details.reasoning_tokens", .{ .integer = resp.usage.reasoning });
+    try json.setWirePath(arena, &raw, "status", .{ .string = resp.finish_reason });
+    return raw;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
