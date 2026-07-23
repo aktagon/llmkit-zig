@@ -50,6 +50,10 @@ pub fn build(b: *std.Build) void {
         "wire-telemetry",
         "Run the telemetry-wire driver and drop target/wire/telemetry/<fixture>/zig.json artifacts",
     );
+    const wire_symmetry_step = b.step(
+        "wire-symmetry",
+        "Run the response-codec fixed-point driver (ADR-076 SYM-006; drops no artifact)",
+    );
 
     // In-module unit tests (src/*.zig).
     const mod_tests = b.addTest(.{ .root_module = llmkit_mod });
@@ -67,6 +71,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/sigv4_wire_test.zig", .wire_step = wire_sigv4_step },
         .{ .path = "tests/catalogue_wire_test.zig", .wire_step = wire_catalogue_step },
         .{ .path = "tests/telemetry_wire_test.zig", .wire_step = wire_telemetry_step },
+        .{ .path = "tests/symmetry_wire_test.zig", .wire_step = wire_symmetry_step },
     }) |driver| {
         const driver_mod = b.createModule(.{
             .root_source_file = b.path(driver.path),

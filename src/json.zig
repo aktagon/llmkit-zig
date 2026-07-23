@@ -108,6 +108,72 @@ pub fn getPath(root: Value, path: []const u8) ?Value {
     return cur;
 }
 
+/// Place `value` at a dotted `path` WITH array indices — the navigate-or-create
+/// inverse of `getPath`, walking the identical generated path strings (ADR-076
+/// SYM-005). Intermediate objects and array elements are created as it
+/// descends, and ANY segment may be indexed, not just the first: Google's
+/// response text path is `candidates[0].content.parts[0].text`, two array levels
+/// created in a single descent.
+///
+/// The wider sibling of `setPath`, which auto-vivifies objects only: the request
+/// side never indexes, the response side must. A malformed segment (which the
+/// generated tables cannot produce) stops the descent without writing, exactly
+/// as `getPath` returns null for one.
+///
+/// An empty path (the provider declares no location for this field) or an empty
+/// value is a no-op: there is nothing to write, and materializing a zero would
+/// invent a field the provider never sent.
+pub fn setWirePath(arena: std.mem.Allocator, root: *Value, path: []const u8, value: Value) !void {
+    if (path.len == 0 or isEmptyWireValue(value)) return;
+    var cur = root;
+    var it = std.mem.splitScalar(u8, path, '.');
+    while (it.next()) |raw_seg| {
+        const bracket = std.mem.indexOfScalar(u8, raw_seg, '[');
+        const name = if (bracket) |b| raw_seg[0..b] else raw_seg;
+        if (name.len > 0) cur = try member(arena, cur, name);
+        if (bracket) |b| {
+            var rest = raw_seg[b..];
+            while (rest.len > 0 and rest[0] == '[') {
+                const close = std.mem.indexOfScalar(u8, rest, ']') orelse return;
+                const idx = std.fmt.parseInt(usize, rest[1..close], 10) catch return;
+                cur = try element(arena, cur, idx);
+                rest = rest[close + 1 ..];
+            }
+        }
+    }
+    cur.* = value;
+}
+
+/// The slot at `parent[name]`, coercing `parent` to an object and creating the
+/// member when absent — the create half of `getPath`'s `object.get(name)`.
+fn member(arena: std.mem.Allocator, parent: *Value, name: []const u8) !*Value {
+    if (std.meta.activeTag(parent.*) != .object) parent.* = object();
+    const gop = try parent.object.getOrPut(arena, try arena.dupe(u8, name));
+    if (!gop.found_existing) gop.value_ptr.* = .null;
+    return gop.value_ptr;
+}
+
+/// The slot at `parent[idx]`, coercing `parent` to an array and padding it with
+/// nulls up to `idx` — the create half of `getPath`'s bounds check.
+fn element(arena: std.mem.Allocator, parent: *Value, idx: usize) !*Value {
+    if (std.meta.activeTag(parent.*) != .array) parent.* = array(arena);
+    while (parent.array.items.len <= idx) try parent.array.append(.null);
+    return &parent.array.items[idx];
+}
+
+/// Whether `value` is the zero of its canonical type. Empty values are skipped
+/// rather than written, so the encoder never claims a provider reported zero
+/// tokens when the canonical `Response` simply had none.
+fn isEmptyWireValue(value: Value) bool {
+    return switch (value) {
+        .string, .number_string => |s| s.len == 0,
+        .integer => |i| i == 0,
+        .float => |f| f == 0,
+        .null => true,
+        else => false,
+    };
+}
+
 /// Deep, numeric-aware value equality — the wire-golden acceptance check. Two
 /// numbers compare by value across the `.integer`/`.float`/`.number_string`
 /// representations (so a golden's `1.0` equals a built `1`); objects compare
@@ -152,6 +218,31 @@ fn numericValue(v: Value) ?f64 {
         else => null,
     };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

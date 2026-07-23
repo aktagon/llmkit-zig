@@ -149,7 +149,10 @@ pub const Agent = struct {
             .op = .llm_request,
             .model = self.model_ orelse "",
         }, body);
-        return response.parseChatResponse(arena, self.provider, raw);
+        // The agent exposes no protocol opt-in, so the effective shape is the
+        // provider's default — the same fact `applyToolDefs` dispatches on.
+        const shape = providers.spec(self.provider).chat_wire_shape;
+        return response.decodeResponse(arena, self.provider, shape, raw);
     }
 };
 

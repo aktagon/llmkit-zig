@@ -426,7 +426,11 @@ pub const Text = struct {
             .op = .llm_request,
             .model = self.model_ orelse "",
         }, try request.buildChatBody(arena, cfg));
-        return response_mod.parseChatResponse(arena, self.provider, raw);
+        // The EFFECTIVE wire shape — the same one buildChatBody resolved — so a
+        // `.protocol(.responses)` reply is decoded with the Responses envelope
+        // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
+        const shape = try request.resolveWireShape(providers.spec(self.provider), cfg.protocol);
+        return response_mod.decodeResponse(arena, self.provider, shape, raw);
     }
 
     /// Stream a ChatCompletion, delivering each text delta to `on_chunk` (may be

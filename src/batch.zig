@@ -115,7 +115,9 @@ pub fn parseBatchResults(arena: std.mem.Allocator, provider: providers.ProviderN
         const parsed = std.json.parseFromSliceLeaky(json.Value, arena, line, .{}) catch continue;
         const body = if (body_path.len > 0) (json.getPath(parsed, body_path) orelse continue) else parsed;
 
-        const resp = response.parseChatResponse(arena, provider, body) catch continue;
+        // Batch is Chat-Completions-only (ADR-055 declares no batch Responses
+        // protocol), so the wire shape is explicitly empty, never derived.
+        const resp = response.decodeResponse(arena, provider, "", body) catch continue;
         try out.append(arena, resp);
     }
     return out.toOwnedSlice(arena);
