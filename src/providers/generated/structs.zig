@@ -56,14 +56,14 @@ pub const ImageResponse = struct {
     /// text is the optional text response accompanying the images (captions, refusals, or model commentary). Populated only when the caller opted into mixed text + image output via the builder's IncludeText() chain method on providers that support it.
     text: []const u8,
 
-    /// usage holds token consumption metrics for the image-generation call. Google reports image-output tokens in usageMetadata.candidatesTokenCount; OpenAI Images API and Vertex Imagen do not return token counts so this stays zero on those providers.
+    /// usage holds token consumption metrics for the image-generation call. Google reports image-output tokens in usageMetadata.candidatesTokenCount; OpenAI Images API and Vertex Imagen do not return token counts, so on those providers no dimension is reported at all — absent, not zero.
     usage: Usage,
 
-    /// finish_reason is the provider stop signal. Examples per provider: Google STOP/IMAGE_OTHER/SAFETY/MAX_TOKENS; OpenAI Images API has no equivalent field (always empty); xAI Grok has no equivalent field (always empty); Vertex Imagen surfaces the RAI filter reason when content is blocked.
-    finish_reason: []const u8,
+    /// finish_reason is the provider stop signal. Examples per provider: Google STOP/IMAGE_OTHER/SAFETY/MAX_TOKENS; OpenAI Images API has no equivalent field (always absent); xAI Grok has no equivalent field (always absent); Vertex Imagen surfaces the RAI filter reason when content is blocked.
+    finish_reason: ?[]const u8,
 
     /// finish_message is the free-text provider explanation of the stop signal. Gemini populates this for non-success FinishReason values; other providers leave it empty. Use as the user-facing message when len(Images) == 0.
-    finish_message: []const u8,
+    finish_message: ?[]const u8,
 
     /// raw is the parsed provider response body, populated only when the caller opted in via the builder's .raw() chain method (ADR-014). Type-erased — consumers cast to a provider-shape type for fields the universal ImageResponse does not carry.
     raw: ?std.json.Value,
@@ -140,14 +140,14 @@ pub const MusicResponse = struct {
     /// text is the optional text accompanying the audio (generated lyrics, song structure, or model commentary). Populated by Gemini Lyria 3; empty on Vertex Lyria 2 and MiniMax.
     text: []const u8,
 
-    /// usage holds token consumption metrics for the music-generation call. None of the three verified providers report audio-output tokens as a distinct dimension; this stays zero unless a provider surfaces counts (ADR-033 OQ-3).
+    /// usage holds token consumption metrics for the music-generation call. None of the three verified providers report audio-output tokens as a distinct dimension; the dimension is unreported unless a provider surfaces counts (ADR-033 OQ-3). Unreported is not zero.
     usage: Usage,
 
     /// finish_reason is the provider stop signal. Gemini surfaces STOP/SAFETY etc.; Vertex Imagen-style providers surface a RAI filter reason when content is blocked; MiniMax carries a base_resp status. Optional.
-    finish_reason: []const u8,
+    finish_reason: ?[]const u8,
 
     /// finish_message is the free-text provider explanation of the stop signal. Use as the user-facing message when len(Audio) == 0.
-    finish_message: []const u8,
+    finish_message: ?[]const u8,
 
     /// raw is the parsed provider response body, populated only when the caller opted in via the builder's .raw() chain method (ADR-014). Type-erased — consumers cast to a provider-shape type for fields the universal MusicResponse does not carry.
     raw: ?std.json.Value,
@@ -170,11 +170,11 @@ pub const Response = struct {
     ///
     usage: Usage,
 
-    /// finish_reason is the provider stop signal, passed through verbatim. Empty when the provider response carries no signal or the parser does not yet read this provider's location. Examples per provider: Google STOP/MAX_TOKENS/SAFETY/RECITATION; OpenAI stop/length/content_filter/tool_calls; Anthropic end_turn/max_tokens/stop_sequence/tool_use; xAI stop/length/content_filter.
-    finish_reason: []const u8,
+    /// finish_reason is the provider stop signal, passed through verbatim. ABSENT (not empty) when the provider response carries no signal or the provider declares no path for it — the two are the same observation, and neither is an empty string (ADR-081). Examples per provider: Google STOP/MAX_TOKENS/SAFETY/RECITATION; OpenAI stop/length/content_filter/tool_calls; Anthropic end_turn/max_tokens/stop_sequence/tool_use; xAI stop/length/content_filter.
+    finish_reason: ?[]const u8,
 
-    /// finish_message is the provider-supplied free-text explanation of the stop signal. Populated by Google when present; OpenAI / Anthropic / xAI do not carry an equivalent field, so this stays empty for them.
-    finish_message: []const u8,
+    /// finish_message is the provider-supplied free-text explanation of the stop signal. Populated by Google when present; OpenAI / Anthropic / xAI carry no equivalent field, so it is ABSENT for them rather than empty (ADR-081).
+    finish_message: ?[]const u8,
 
     /// raw is the parsed provider response body, populated only when the caller opted in via the typed builder's .raw() chain method (ADR-014). Type-erased — provider-specific fields (Anthropic citations, OpenAI logprobs, Google promptFeedback, ...) are not part of the universal Response shape; consumers cast to a provider-shape type once they know which provider they're talking to.
     raw: ?std.json.Value,
@@ -185,11 +185,11 @@ pub const SpeechResponse = struct {
     /// audio is the synthesized audio (mime type + raw bytes). One synthesis yields one clip, so this is a single AudioData, not a list (ADR-049 OQ-4).
     audio: AudioData,
 
-    /// usage holds provider-reported usage. Inworld returns usage.processedCharactersCount, but the SDK does not yet surface it: the Usage carrier has no characters axis and OQ-3 declined to overload a token axis, so this stays zero pending a typed characters dimension (ADR-049 OQ-3, deferred).
+    /// usage holds provider-reported usage. Inworld returns usage.processedCharactersCount, but the SDK does not yet surface it: the Usage carrier has no characters axis and OQ-3 declined to overload a token axis, so it is left UNREPORTED pending a typed characters dimension (ADR-049 OQ-3, deferred) — honest absence rather than a zero that would read as a measurement.
     usage: Usage,
 
     /// finish_reason is the provider stop signal, when present. Optional.
-    finish_reason: []const u8,
+    finish_reason: ?[]const u8,
 };
 
 /// ToolCall is a single tool invocation issued by the model on an assistant turn. Carries the provider-issued id, the tool name, and the JSON-decoded argument object. ADR-020 promotes this from a private per-SDK type into a public generated struct so *Agent history can carry tool turns end to end.
@@ -245,7 +245,7 @@ pub const TranscriptionResponse = struct {
     /// segments are the timed transcript segments (start/end offsets in milliseconds). Empty when the provider returns no word-level timing.
     segments: []const TranscriptSegment,
 
-    /// usage holds provider-reported usage. AssemblyAI bills by audio duration, not tokens; this stays zero unless a provider surfaces a token axis (ADR-048 OQ-2).
+    /// usage holds provider-reported usage. AssemblyAI bills by audio duration, not tokens; no dimension is reported unless a provider surfaces a token axis (ADR-048 OQ-2). Unreported is not zero.
     usage: Usage,
 };
 
@@ -284,14 +284,14 @@ pub const VideoResponse = struct {
     /// videos are the finished video references. url-delivery providers (grok) fill VideoData.url; download-delivery providers fill VideoData.bytes with bytes the SDK fetched; output-uri providers (Bedrock) carry the caller S3 URI in url. Empty when the job failed — inspect FinishReason / FinishMessage.
     videos: []const VideoData,
 
-    /// usage holds token consumption metrics for the video-generation call. No verified provider reports a video usage axis yet; this stays zero unless a provider surfaces counts (ADR-034 OQ-3).
+    /// usage holds token consumption metrics for the video-generation call. No verified provider reports a video usage axis yet; the dimensions stay unreported unless a provider surfaces counts (ADR-034 OQ-3). Unreported is not zero.
     usage: Usage,
 
     /// finish_reason is the provider terminal status / stop signal (grok: a non-done status such as expired or failed). Empty on success. Optional.
-    finish_reason: []const u8,
+    finish_reason: ?[]const u8,
 
     /// finish_message is the free-text provider explanation of a non-success status (grok: error.message on a failed job). Use as the user-facing message when len(Videos) == 0.
-    finish_message: []const u8,
+    finish_message: ?[]const u8,
 
     /// raw is the parsed provider poll response body, populated only when the caller opted in via the builder's .raw() chain method (ADR-014). Type-erased — consumers cast to a provider-shape type for fields the universal VideoResponse does not carry.
     raw: ?std.json.Value,

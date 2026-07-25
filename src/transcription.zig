@@ -20,7 +20,7 @@
 //!     `{text, segments}`, dispatched on the generated `wire_shape` fact.
 //!     TranscriptionOpenAI (verbose_json) is implemented; its segment offsets
 //!     are SECONDS (float) -> integer milliseconds (x1000, rounded, OAA-006).
-//!     Usage stays ALL ZERO (OAA-007 — OpenAI reports no token usage for STT).
+//!     Usage is NOT REPORTED (OAA-007 — OpenAI reports no token usage for STT).
 //!
 //! Everything here is backed by a caller-supplied allocator (pass an arena for a
 //! whole build/parse and free it in one shot). Runtime concerns (pre-flight
@@ -54,7 +54,7 @@ pub const TranscriptSegment = struct {
 };
 
 /// The normalized speech-to-text reply: the full transcript text, the timed
-/// segments, the shared token carrier (stays zero for STT), and an optional
+/// segments, the shared token carrier (unreported for STT), and an optional
 /// finish reason. The container is TEXT-shaped, not a media `*Data` container —
 /// the structural divergence from video/speech (ADR-048). Mirror of Rust/Go
 /// `TranscriptionResponse`.
@@ -62,7 +62,7 @@ pub const TranscriptionResponse = struct {
     text: []const u8,
     segments: []const TranscriptSegment,
     usage: response.Usage = .{},
-    finish_reason: []const u8 = "",
+    finish_reason: ?[]const u8 = null,
 };
 
 /// A real encoded multipart/form-data body plus the boundary it used. The driver
@@ -326,7 +326,7 @@ pub fn parseTranscriptionResponse(arena: std.mem.Allocator, provider: ProviderNa
 /// Decode the OpenAI verbose_json transcript: top-level `text` plus a
 /// `segments[]` array of `{text, start, end}` (seconds -> ms). Models without a
 /// `segments[]` array yield an empty segment slice, not an error. Speaker is
-/// always empty (OpenAI does not diarize). Usage stays zero (OAA-007).
+/// always empty (OpenAI does not diarize). Usage is unreported (OAA-007) — not a count of zero.
 fn parseOpenAITranscription(arena: std.mem.Allocator, raw: json.Value) ParseError!TranscriptionResponse {
     const text = try arena.dupe(u8, getString(raw, "text") orelse "");
 

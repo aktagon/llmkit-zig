@@ -164,14 +164,37 @@ fn element(arena: std.mem.Allocator, parent: *Value, idx: usize) !*Value {
 /// Whether `value` is the zero of its canonical type. Empty values are skipped
 /// rather than written, so the encoder never claims a provider reported zero
 /// tokens when the canonical `Response` simply had none.
+/// Whether `value` carries nothing to write. `.null` is the caller saying the
+/// field was never reported, so there is no location to fill.
+///
+/// A numeric zero is NOT empty (ADR-081). It used to be: the encoder dropped
+/// every zero, so a body that explicitly said `cached_tokens: 0` round-tripped
+/// to one that omitted the field — the reader then had to guess, and guessed
+/// zero, which happened to look right. Now absence arrives as `.null` and a
+/// reported zero arrives as `.{ .integer = 0 }`, so the encoder can tell them
+/// apart instead of inferring one from the other.
 fn isEmptyWireValue(value: Value) bool {
     return switch (value) {
         .string, .number_string => |s| s.len == 0,
-        .integer => |i| i == 0,
-        .float => |f| f == 0,
         .null => true,
         else => false,
     };
+}
+
+/// An unreported canonical field becomes `.null`, which `setWirePath` skips; a
+/// reported value — zero included — becomes a real JSON value and is written.
+pub fn wireInt(value: ?i64) Value {
+    return if (value) |v| .{ .integer = v } else .null;
+}
+
+/// `wireInt` for the fractional provider-reported USD cost.
+pub fn wireFloat(value: ?f64) Value {
+    return if (value) |v| .{ .float = v } else .null;
+}
+
+/// `wireInt` for the optional canonical signal strings.
+pub fn wireString(value: ?[]const u8) Value {
+    return if (value) |v| .{ .string = v } else .null;
 }
 
 /// Deep, numeric-aware value equality — the wire-golden acceptance check. Two

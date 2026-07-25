@@ -17,6 +17,14 @@
 //! send, middleware) are later slices; this file is the wire-shaped core.
 
 const std = @import("std");
+
+/// A parsed signal string as an optional canonical field: an empty extraction
+/// means the provider sent no value, which is absence, not the empty string.
+/// Zig coerces `[]const u8` into `?[]const u8` silently, so a bare "" would
+/// store a REPORTED empty string with no compiler complaint.
+fn optString(value: []const u8) ?[]const u8 {
+    return if (value.len == 0) null else value;
+}
 const http = @import("http.zig");
 const send = @import("send.zig");
 const json = @import("json.zig");
@@ -49,8 +57,8 @@ pub const ImageResponse = struct {
     images: []const ImageData,
     text: []const u8 = "",
     usage: response.Usage = .{},
-    finish_reason: []const u8 = "",
-    finish_message: []const u8 = "",
+    finish_reason: ?[]const u8 = null,
+    finish_message: ?[]const u8 = null,
 };
 
 pub const BuildError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
@@ -308,7 +316,7 @@ fn buildRecraftGenBody(arena: std.mem.Allocator, img: Image, prompt: []const u8)
 /// Project a parsed provider image REPLY into the normalized `ImageResponse`,
 /// dispatched on the provider's generated `response_shape` fact (BUG-024) —
 /// never a provider-name switch. Usage is read through the config's dotted
-/// `usage_*_path` facts (empty path -> the honest zero). Mirrors the
+/// `usage_*_path` facts (empty path -> unreported, not zero). Mirrors the
 /// `match img_cfg.response_shape` block in Rust `generate_image`.
 pub fn parseImageResponse(arena: std.mem.Allocator, provider: ProviderName, raw: json.Value) ParseError!ImageResponse {
     const cfg = image_gen.imageGenConfig(provider) orelse
@@ -354,7 +362,7 @@ fn parseDataArrayB64Json(arena: std.mem.Allocator, raw: json.Value, input_path: 
 }
 
 /// Decode the Vertex Imagen `:predict` shape: `{predictions:[{bytesBase64Encoded,
-/// mimeType}]}`. Vertex reports no token counts, so Usage stays zero. Mirrors
+/// mimeType}]}`. Vertex reports no token counts at all, so no dimension is reported. Mirrors
 /// Rust `parse_vertex_image_response`.
 fn parseVertexPredictions(arena: std.mem.Allocator, raw: json.Value) ParseError!ImageResponse {
     var images: std.ArrayList(ImageData) = .empty;
@@ -378,7 +386,7 @@ fn parseVertexPredictions(arena: std.mem.Allocator, raw: json.Value) ParseError!
     }
     return .{
         .images = try images.toOwnedSlice(arena),
-        .finish_reason = finish_reason,
+        .finish_reason = optString(finish_reason),
     };
 }
 
@@ -415,8 +423,8 @@ fn parseGoogleParts(arena: std.mem.Allocator, raw: json.Value, input_path: []con
         .images = try images.toOwnedSlice(arena),
         .text = try std.mem.join(arena, "", text.items),
         .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path) },
-        .finish_reason = finish_reason,
-        .finish_message = finish_message,
+        .finish_reason = optString(finish_reason),
+        .finish_message = optString(finish_message),
     };
 }
 
@@ -431,7 +439,7 @@ fn getString(v: json.Value, key: []const u8) ?[]const u8 {
 }
 
 /// Read an integer at a dotted path; empty path or a missing/non-numeric value
-/// yields 0 (the honest zero for an unreported token dimension).
+/// yields null — an unreported dimension is absent, not zero (ADR-081).
 fn intAt(raw: json.Value, path: []const u8) i64 {
     if (path.len == 0) return 0;
     const v = json.getPath(raw, path) orelse return 0;

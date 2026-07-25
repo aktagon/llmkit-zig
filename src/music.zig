@@ -57,7 +57,7 @@ pub const AudioData = struct {
 pub const MusicResponse = struct {
     audio: []const AudioData,
     usage: response.Usage = .{},
-    finish_reason: []const u8 = "",
+    finish_reason: ?[]const u8 = null,
 };
 
 pub const BuildError = error{
