@@ -9,12 +9,16 @@
 //! content path (`response.zig`), the usage input/output paths (`response.zig`),
 //! the cache write/read paths (`caching.zig`), and the reasoning/finish/error
 //! paths (the `ProviderSpec` in `providers.zig`) are all data. An empty path
-//! means "this provider does not report that dimension" and the field defaults
-//! to 0 / "" / null — the honest zero, never a fabricated value.
+//! means "this provider does not report that dimension", and the field is then
+//! NULL, not zero (ADR-081): a provider reporting `cached_tokens: 0` and a
+//! provider that never mentions caching are different claims, and a zero cannot
+//! carry both. This module used to call that zero "honest"; it was the one
+//! value guaranteed to be indistinguishable from a real measurement.
 //!
 //! Cost follows ADR-027: value at the provider's `usageCostPath`, multiplied by
 //! its `usageCostScale` (xAI reports ticks; scale 1e-10 → USD). Providers that
-//! do not report cost carry an empty path → cost 0.0.
+//! do not report cost carry an empty path → cost null. An unreported cost is
+//! not a free request (AVAIL-007).
 //!
 //! Strings are duped into the caller's arena, so a `Response` outlives the
 //! parsed body it was read from.
@@ -34,14 +38,13 @@ const ProviderName = providers.ProviderName;
 
 /// Token accounting, one field per `TokenDimension`. The carrier field on
 /// `Response` is named `usage` (load-bearing for the cross-SDK naming lint).
-pub const Usage = struct {
-    input: i64 = 0,
-    output: i64 = 0,
-    cache_read: i64 = 0,
-    cache_write: i64 = 0,
-    reasoning: i64 = 0,
-    cost: f64 = 0,
-};
+///
+/// GENERATED from the `TokenDimension` instances and re-exported here so
+/// the hand-written surface keeps one name for it. It used to be redeclared in
+/// this file, which meant two structs named `Usage` in one package — and the
+///
+/// produced was dead while a hand-written copy did the work.
+pub const Usage = @import("providers/generated/usage_gen.zig").Usage;
 
 /// A provider error envelope, when the reply carries one at the declared
 /// `error_message_path`. Null on a successful reply.
@@ -55,8 +58,8 @@ pub const ApiError = struct {
 /// null). `usage` MUST keep this name — the naming lint keys on it.
 pub const Response = struct {
     content: []const u8,
-    finish_reason: []const u8,
-    finish_message: []const u8 = "",
+    finish_reason: ?[]const u8,
+    finish_message: ?[]const u8 = null,
     err: ?ApiError = null,
     usage: Usage,
 };
@@ -71,30 +74,38 @@ fn stringAt(raw: json.Value, path: []const u8) []const u8 {
     };
 }
 
-/// Read an integer at a dotted path; empty path or a missing/non-numeric value
-/// yields 0 (the honest zero for an unreported token dimension).
-fn intAt(raw: json.Value, path: []const u8) i64 {
-    if (path.len == 0) return 0;
-    const v = json.getPath(raw, path) orelse return 0;
+/// Read an integer at a dotted path, or null when the provider declares no path
+/// for this field or the response did not carry it (ADR-081).
+fn optInt(raw: json.Value, path: []const u8) ?i64 {
+    if (path.len == 0) return null;
+    const v = json.getPath(raw, path) orelse return null;
     return switch (v) {
         .integer => |i| i,
         .float => |f| @intFromFloat(f),
-        .number_string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
-        else => 0,
+        .number_string => |s| std.fmt.parseInt(i64, s, 10) catch null,
+        else => null,
     };
 }
 
-/// Read a float at a dotted path; empty path or a missing/non-numeric value
-/// yields 0.
-fn floatAt(raw: json.Value, path: []const u8) f64 {
-    if (path.len == 0) return 0;
-    const v = json.getPath(raw, path) orelse return 0;
+/// `optInt` for the fractional provider-reported USD cost (ADR-027).
+fn optFloat(raw: json.Value, path: []const u8) ?f64 {
+    if (path.len == 0) return null;
+    const v = json.getPath(raw, path) orelse return null;
     return switch (v) {
         .integer => |i| @floatFromInt(i),
         .float => |f| f,
-        .number_string => |s| std.fmt.parseFloat(f64, s) catch 0,
-        else => 0,
+        .number_string => |s| std.fmt.parseFloat(f64, s) catch null,
+        else => null,
     };
+}
+
+/// A parsed signal string as an optional canonical field, duped into the
+/// caller's arena. An empty extraction means the provider declared no path or
+/// sent no value, which is absence, not the empty string — and `arena.dupe` of
+/// "" would coerce into the optional as a REPORTED empty string, the wrong side
+/// of the very distinction ADR-081 draws, with no compiler complaint.
+fn dupOptString(arena: std.mem.Allocator, value: []const u8) !?[]const u8 {
+    return if (value.len == 0) null else try arena.dupe(u8, value);
 }
 
 fn detectError(arena: std.mem.Allocator, raw: json.Value, ps: providers.ProviderSpec) !?ApiError {
@@ -149,17 +160,21 @@ pub fn decodeResponse(
 
     return .{
         .content = try arena.dupe(u8, stringAt(raw, response_paths.responseTextPath(provider))),
-        .finish_reason = try arena.dupe(u8, stringAt(raw, ps.finish_reason_path)),
-        .finish_message = try arena.dupe(u8, stringAt(raw, ps.finish_message_path)),
+        .finish_reason = try dupOptString(arena, stringAt(raw, ps.finish_reason_path)),
+        .finish_message = try dupOptString(arena, stringAt(raw, ps.finish_message_path)),
         .err = try detectError(arena, raw, ps),
         .usage = .{
-            .input = intAt(raw, usage_paths.input),
-            .output = intAt(raw, usage_paths.output),
-            .cache_write = intAt(raw, cache.write),
-            .cache_read = intAt(raw, cache.read),
-            .reasoning = intAt(raw, ps.reasoning_tokens_path),
-            .cost = floatAt(raw, response_paths.usageCostPath(provider)) *
-                response_paths.usageCostScale(provider),
+            .input = optInt(raw, usage_paths.input),
+            .output = optInt(raw, usage_paths.output),
+            .cache_write = optInt(raw, cache.write),
+            .cache_read = optInt(raw, cache.read),
+            .reasoning = optInt(raw, ps.reasoning_tokens_path),
+            // Scaling PRESERVES absence: an unreported cost stays unreported
+            // rather than becoming `0.0 * scale` (AVAIL-007).
+            .cost = if (optFloat(raw, response_paths.usageCostPath(provider))) |c|
+                c * response_paths.usageCostScale(provider)
+            else
+                null,
         },
     };
 }
@@ -194,18 +209,19 @@ pub fn encodeResponse(
 
     var raw = json.object();
     try json.setWirePath(arena, &raw, response_paths.responseTextPath(provider), .{ .string = resp.content });
-    try json.setWirePath(arena, &raw, usage_paths.input, .{ .integer = resp.usage.input });
-    try json.setWirePath(arena, &raw, usage_paths.output, .{ .integer = resp.usage.output });
-    try json.setWirePath(arena, &raw, cache.write, .{ .integer = resp.usage.cache_write });
-    try json.setWirePath(arena, &raw, cache.read, .{ .integer = resp.usage.cache_read });
+    try json.setWirePath(arena, &raw, usage_paths.input, json.wireInt(resp.usage.input));
+    try json.setWirePath(arena, &raw, usage_paths.output, json.wireInt(resp.usage.output));
+    try json.setWirePath(arena, &raw, cache.write, json.wireInt(resp.usage.cache_write));
+    try json.setWirePath(arena, &raw, cache.read, json.wireInt(resp.usage.cache_read));
     const scale = response_paths.usageCostScale(provider);
     if (scale != 0) {
-        const cost = resp.usage.cost / scale;
-        try json.setWirePath(arena, &raw, response_paths.usageCostPath(provider), .{ .float = cost });
+        // An unreported cost has no wire location to fill.
+        const cost = if (resp.usage.cost) |c| c / scale else null;
+        try json.setWirePath(arena, &raw, response_paths.usageCostPath(provider), json.wireFloat(cost));
     }
-    try json.setWirePath(arena, &raw, ps.reasoning_tokens_path, .{ .integer = resp.usage.reasoning });
-    try json.setWirePath(arena, &raw, ps.finish_reason_path, .{ .string = resp.finish_reason });
-    try json.setWirePath(arena, &raw, ps.finish_message_path, .{ .string = resp.finish_message });
+    try json.setWirePath(arena, &raw, ps.reasoning_tokens_path, json.wireInt(resp.usage.reasoning));
+    try json.setWirePath(arena, &raw, ps.finish_reason_path, json.wireString(resp.finish_reason));
+    try json.setWirePath(arena, &raw, ps.finish_message_path, json.wireString(resp.finish_message));
     // The error envelope is part of the canonical projection Zig's `Response`
     // carries (`err`), so its two paths are written back like any other — the
     // mirror of `detectError`.
@@ -224,7 +240,11 @@ pub fn encodeResponse(
 /// An empty value is not an error: there is nothing to write, so the common
 /// path stays usable and only the lying path fails.
 fn guardOneWayFields(provider: ProviderName, resp: Response) EncodeError!void {
-    if (provider == .vertex and resp.finish_reason.len > 0) {
+    // Non-empty, not merely present: the guard exists to refuse FABRICATION,
+    // and neither an unreported field nor a reported empty one would write
+    // anything (see `isEmptyWireValue`). Only a value that would reach the wire
+    // lies.
+    if (provider == .vertex and (resp.finish_reason orelse @as([]const u8, "")).len > 0) {
         // exceptVertexFinishReason, canonical path: response.finish_reason.
         // The comment carries what the error cannot: a Zig error set has no
         // payload, so `field` and `message` — which the other six SDKs pass to
@@ -252,12 +272,14 @@ fn guardOneWayFields(provider: ProviderName, resp: Response) EncodeError!void {
 fn parseResponsesEnvelope(arena: std.mem.Allocator, raw: json.Value) !Response {
     return .{
         .content = try arena.dupe(u8, extractResponsesText(raw)),
-        .finish_reason = try arena.dupe(u8, stringAt(raw, "status")),
+        .finish_reason = try dupOptString(arena, stringAt(raw, "status")),
+        // The Responses envelope carries no cache-write or cost field at all.
+        // That is not a zero: it is the provider never making the claim.
         .usage = .{
-            .input = intAt(raw, "usage.input_tokens"),
-            .output = intAt(raw, "usage.output_tokens"),
-            .cache_read = intAt(raw, "usage.input_tokens_details.cached_tokens"),
-            .reasoning = intAt(raw, "usage.output_tokens_details.reasoning_tokens"),
+            .input = optInt(raw, "usage.input_tokens"),
+            .output = optInt(raw, "usage.output_tokens"),
+            .cache_read = optInt(raw, "usage.input_tokens_details.cached_tokens"),
+            .reasoning = optInt(raw, "usage.output_tokens_details.reasoning_tokens"),
         },
     };
 }
@@ -307,11 +329,11 @@ fn encodeResponsesEnvelope(arena: std.mem.Allocator, resp: Response) EncodeError
         try output.array.append(item);
         try json.set(arena, &raw, "output", output);
     }
-    try json.setWirePath(arena, &raw, "usage.input_tokens", .{ .integer = resp.usage.input });
-    try json.setWirePath(arena, &raw, "usage.output_tokens", .{ .integer = resp.usage.output });
-    try json.setWirePath(arena, &raw, "usage.input_tokens_details.cached_tokens", .{ .integer = resp.usage.cache_read });
-    try json.setWirePath(arena, &raw, "usage.output_tokens_details.reasoning_tokens", .{ .integer = resp.usage.reasoning });
-    try json.setWirePath(arena, &raw, "status", .{ .string = resp.finish_reason });
+    try json.setWirePath(arena, &raw, "usage.input_tokens", json.wireInt(resp.usage.input));
+    try json.setWirePath(arena, &raw, "usage.output_tokens", json.wireInt(resp.usage.output));
+    try json.setWirePath(arena, &raw, "usage.input_tokens_details.cached_tokens", json.wireInt(resp.usage.cache_read));
+    try json.setWirePath(arena, &raw, "usage.output_tokens_details.reasoning_tokens", json.wireInt(resp.usage.reasoning));
+    try json.setWirePath(arena, &raw, "status", json.wireString(resp.finish_reason));
     return raw;
 }
 

@@ -12,7 +12,7 @@
 //!   - `parseSpeechResponse` projects a provider REPLY to a single `AudioData`,
 //!     dispatched on the generated `audio_response_encoding` fact
 //!     (base64Envelope -> decode the `audioContent` field, Inworld; rawBody ->
-//!     the whole body IS the audio bytes, OpenAI). Usage stays ALL ZERO:
+//!     the whole body IS the audio bytes, OpenAI). Usage is NOT REPORTED:
 //!     Inworld's `processedCharactersCount` is deliberately dropped (ADR-049
 //!     OQ-3 — the two TTS providers disagree on a characters axis, so it is not
 //!     mapped to a token dimension).
@@ -45,12 +45,12 @@ pub const AudioData = struct {
 };
 
 /// The normalized text-to-speech reply: a single synthesized clip (one
-/// synthesis, one clip — ADR-049 OQ-4), the shared token carrier (stays zero
+/// synthesis, one clip — ADR-049 OQ-4), the shared token carrier (unreported
 /// for speech), and an optional finish reason. Mirror of Rust `SpeechResponse`.
 pub const SpeechResponse = struct {
     audio: AudioData,
     usage: response.Usage = .{},
-    finish_reason: []const u8 = "",
+    finish_reason: ?[]const u8 = null,
 };
 
 pub const BuildError = error{UnsupportedSpeechProvider} || std.mem.Allocator.Error;
@@ -186,7 +186,7 @@ fn buildOpenAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8)
 /// (Inworld) parses a JSON envelope and base64-decodes the `audioContent` field.
 /// A 2xx body that does not parse to audio is a decoding error (HANDOFF-036 A5),
 /// never a silent empty clip. `mimeType` is the provider's output MIME; Usage
-/// stays zero (ADR-049 OQ-3). Mirrors Rust `parse_speech_response`.
+/// is left unreported (ADR-049 OQ-3). Mirrors Rust `parse_speech_response`.
 pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, body: []const u8) ParseError!SpeechResponse {
     const cfg = speech_gen.speechGenConfig(provider) orelse
         return error.UnsupportedSpeechProvider;
