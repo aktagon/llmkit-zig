@@ -29,6 +29,7 @@ const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
+const provider_turn = @import("provider_turn.zig");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 
@@ -141,7 +142,7 @@ pub const Agent = struct {
         prompt: []const u8,
     ) !response.Response {
         const body = try self.buildBody(arena, prompt);
-        const raw = try send.postJson(transport, arena, .{
+        const reply = try send.postJsonWithText(transport, arena, .{
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
@@ -152,7 +153,13 @@ pub const Agent = struct {
         // The agent exposes no protocol opt-in, so the effective shape is the
         // provider's default — the same fact `applyToolDefs` dispatches on.
         const shape = providers.spec(self.provider).chat_wire_shape;
-        return response.decodeResponse(arena, self.provider, shape, raw);
+        var resp = try response.decodeResponse(arena, self.provider, shape, reply.value);
+        // ADR-085: capture the turn from the reply BYTES (see client.zig). The
+        // single-round terminal returns it so a caller running their own loop can
+        // thread it forward; the auto-execution loop that would REPLAY it lands
+        // with the multi-turn history builder (provider_turn.zig scope note).
+        resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);
+        return resp;
     }
 };
 

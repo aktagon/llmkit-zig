@@ -24,6 +24,7 @@ const music_mod = @import("music.zig");
 const upload_mod = @import("upload.zig");
 const response_mod = @import("response.zig");
 const send = @import("send.zig");
+const provider_turn = @import("provider_turn.zig");
 const capability = @import("capability.zig");
 const middleware = @import("middleware.zig");
 
@@ -417,7 +418,7 @@ pub const Text = struct {
         text_prompt: []const u8,
     ) !response_mod.Response {
         const cfg = self.chatConfig(text_prompt);
-        const raw = try send.postJson(transport, arena, .{
+        const reply = try send.postJsonWithText(transport, arena, .{
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
@@ -430,7 +431,12 @@ pub const Text = struct {
         // `.protocol(.responses)` reply is decoded with the Responses envelope
         // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
         const shape = try request.resolveWireShape(providers.spec(self.provider), cfg.protocol);
-        return response_mod.decodeResponse(arena, self.provider, shape, raw);
+        var resp = try response_mod.decodeResponse(arena, self.provider, shape, reply.value);
+        // ADR-085: capture the assistant turn as the provider serialized it, from
+        // the reply BYTES. decodeResponse only ever sees the parsed tree, which
+        // has no memory of them (ADR-069 ZIG-002), so the capture happens here.
+        resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);
+        return resp;
     }
 
     /// Stream a ChatCompletion, delivering each text delta to `on_chunk` (may be

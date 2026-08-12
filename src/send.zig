@@ -56,8 +56,26 @@ pub fn postJson(
     args: Args,
     body: json.Value,
 ) !json.Value {
+    return (try postJsonWithText(transport, arena, args, body)).value;
+}
+
+/// A JSON reply as BOTH the source bytes and the parsed tree.
+pub const Reply = struct { text: []const u8, value: json.Value };
+
+/// POST a JSON body and return the reply bytes alongside the parsed tree.
+///
+/// The chat paths need both: ADR-085 captures the assistant turn from the
+/// ORIGINAL text — a tree re-serialized through `json.stringify` is the SDK's
+/// rendering, not the provider's — while every other field is read off the tree.
+pub fn postJsonWithText(
+    transport: http.Transport,
+    arena: std.mem.Allocator,
+    args: Args,
+    body: json.Value,
+) !Reply {
     const raw = try postRaw(transport, arena, args, try json.stringify(arena, body), "application/json");
-    return std.json.parseFromSliceLeaky(json.Value, arena, raw, .{}) catch error.ApiError;
+    const value = std.json.parseFromSliceLeaky(json.Value, arena, raw, .{}) catch return error.ApiError;
+    return .{ .text = raw, .value = value };
 }
 
 /// POST a pre-encoded body and return the RAW reply bytes. Used by the
