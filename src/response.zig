@@ -33,6 +33,7 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const response_paths = @import("providers/generated/response.zig");
 const caching = @import("providers/generated/caching.zig");
+const provider_turn = @import("provider_turn.zig");
 
 const ProviderName = providers.ProviderName;
 
@@ -62,6 +63,13 @@ pub const Response = struct {
     finish_message: ?[]const u8 = null,
     err: ?ApiError = null,
     usage: Usage,
+    /// The assistant turn this response carried, as the provider serialized it
+    /// (ADR-085). Populated by the SEND seam, not by `decodeResponse`: the codec
+    /// is Value-typed (ADR-069 ZIG-002) and a parsed tree has no memory of the
+    /// source text, so the bytes are sliced where they still exist. Null when the
+    /// shape declares no turn position (Bedrock) or the body carries nothing
+    /// there.
+    provider_turn: ?provider_turn.ProviderTurn = null,
 };
 
 /// Read a string at a dotted path; empty path or a non-string value yields "".
