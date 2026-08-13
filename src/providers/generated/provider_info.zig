@@ -64,7 +64,7 @@ pub const all_provider_info = [_]ProviderInfo{
         .id = .cerebras,
         .slug = "cerebras",
         .env_var = "CEREBRAS_API_KEY",
-        .default_model = "llama-3.3-70b",
+        .default_model = "gpt-oss-120b",
         .base_url = "https://api.cerebras.ai",
         .browser_callable = false,
     },

@@ -301,7 +301,7 @@ pub fn spec(name: ProviderName) ProviderSpec {
             .slug = "cerebras",
             .base_url = "https://api.cerebras.ai",
             .endpoint = "/v1/chat/completions",
-            .default_model = "llama-3.3-70b",
+            .default_model = "gpt-oss-120b",
             .env_var = "CEREBRAS_API_KEY",
             .default_max_tokens = 4096,
             .response_text_path = "choices[0].message.content",
