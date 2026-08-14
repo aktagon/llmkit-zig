@@ -141,9 +141,17 @@ pub const Music = struct {
         const md = try self.resolveModel(cfg);
         const body = try self.buildMusicBody(arena, prompt);
 
+        // MiniMax serves music off a DIFFERENT host than chat — the generated
+        // `base_url` fact. A client-supplied base-URL override still wins, since
+        // that is the caller pointing the SDK at a gateway on purpose. Same
+        // shape as the video path above it.
+        var ctx = self.ctx;
+        if (ctx.base_url == null and cfg.base_url.len > 0)
+            ctx.base_url = cfg.base_url;
+
         const raw = try send.postJson(transport, arena, .{
             .provider = self.provider,
-            .ctx = &self.ctx,
+            .ctx = &ctx,
             .api_key = api_key,
             .endpoint = try musicEndpoint(arena, cfg, self.model_ orelse ""),
             .op = .music_generation,
@@ -166,9 +174,10 @@ pub const Music = struct {
 
 /// The generation endpoint: the music-specific `gen_endpoint` when the fact
 /// carries one, else the provider's chat endpoint (Gemini reuses
-/// generateContent), with `{model}` substituted. An absolute `gen_endpoint`
-/// (MiniMax ships a full URL) is returned as-is — `http.buildUrl` joins a
-/// relative path to the base, and joining an absolute one would corrupt it.
+/// generateContent), with `{model}` substituted. Always a RELATIVE path joined
+/// to the resolved base: MiniMax used to ship a full absolute URL here, which
+/// made it the one call no base-URL override could redirect; its host is now
+/// the `base_url` fact applied by the caller above.
 fn musicEndpoint(arena: std.mem.Allocator, cfg: music_gen.MusicGenDef, model_id: []const u8) ![]const u8 {
     const template = if (cfg.gen_endpoint.len > 0) cfg.gen_endpoint else "";
     return replaceModel(arena, template, model_id);
