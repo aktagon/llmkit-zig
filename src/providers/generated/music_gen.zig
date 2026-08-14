@@ -17,6 +17,7 @@ pub const MusicModelDef = struct {
 pub const MusicGenDef = struct {
     wire_shape: []const u8,
     gen_endpoint: []const u8,
+    base_url: []const u8,
     models: []const MusicModelDef,
 };
 
@@ -25,6 +26,7 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
         .google => .{
             .wire_shape = "MusicGenerateContent",
             .gen_endpoint = "",
+            .base_url = "",
             .models = &.{
                 .{
                     .model_id = "lyria-3-clip-preview",
@@ -48,7 +50,8 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
         },
         .minimax => .{
             .wire_shape = "MusicMinimax",
-            .gen_endpoint = "https://api.minimax.io/v1/music_generation",
+            .gen_endpoint = "/v1/music_generation",
+            .base_url = "https://api.minimax.io",
             .models = &.{
                 .{
                     .model_id = "music-2.6",
@@ -64,6 +67,7 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
         .vertex => .{
             .wire_shape = "MusicPredict",
             .gen_endpoint = "",
+            .base_url = "",
             .models = &.{
                 .{
                     .model_id = "lyria-002",
