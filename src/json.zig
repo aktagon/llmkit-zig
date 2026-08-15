@@ -125,7 +125,9 @@ pub fn getPath(root: Value, path: []const u8) ?Value {
 /// equality test there would match nothing.
 ///
 /// Navigation reuses `getPath`, so there is no second path grammar here. The
-/// returned slice borrows from `root`; the caller owns nothing.
+/// returned SLICE is allocated from `arena` (toOwnedSlice); its ELEMENTS
+/// borrow from `root` and are not copied. Arena callers free nothing; a
+/// caller passing any other allocator owns the slice.
 pub fn matchingBlocks(
     arena: std.mem.Allocator,
     root: Value,
