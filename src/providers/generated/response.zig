@@ -1,6 +1,7 @@
 // Code generated — DO NOT EDIT.
 
 
+const std = @import("std");
 const ProviderName = @import("providers.zig").ProviderName;
 
 pub fn responseTextPath(provider: ProviderName) []const u8 {
@@ -42,6 +43,48 @@ pub fn responseTextPath(provider: ProviderName) []const u8 {
         .yi => "choices[0].message.content",
         .zhipu => "choices[0].message.content",
     };
+}
+
+/// Where the assistant's text sits in a block-ARRAY response, located by
+/// discriminator rather than array position: a leading thinking block or
+/// non-text part shifts text out from under a fixed path (BUG-053).
+///
+/// marker_path empty: every element is a text block. marker_path set with
+/// marker_value empty: element is text if the key is PRESENT. Both set:
+/// element is text if the key EQUALS the value.
+///
+/// marker_value is also a WRITE instruction: encodeResponse stamps it onto
+/// the block it writes, so an emitted body reads back through this table.
+pub const ResponseTextConfig = struct {
+    blocks_path: []const u8,
+    marker_path: []const u8,
+    marker_value: []const u8,
+    value_path: []const u8,
+};
+
+/// Text-block selector for a chat wire shape, or null when the shape carries
+/// text as a plain scalar — null SELECTS the responseTextPath reader above,
+/// it does not mean the shape has no text.
+pub fn responseTextConfig(chat_wire_shape: []const u8) ?ResponseTextConfig {
+    if (std.mem.eql(u8, chat_wire_shape, "ChatAnthropic")) return .{
+        .blocks_path = "content",
+        .marker_path = "type",
+        .marker_value = "text",
+        .value_path = "text",
+    };
+    if (std.mem.eql(u8, chat_wire_shape, "ChatBedrock")) return .{
+        .blocks_path = "output.message.content",
+        .marker_path = "text",
+        .marker_value = "",
+        .value_path = "text",
+    };
+    if (std.mem.eql(u8, chat_wire_shape, "ChatGoogle")) return .{
+        .blocks_path = "candidates[0].content.parts",
+        .marker_path = "text",
+        .marker_value = "",
+        .value_path = "text",
+    };
+    return null;
 }
 
 pub const UsagePaths = struct {
