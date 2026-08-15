@@ -73,6 +73,58 @@ pub const Response = struct {
 };
 
 /// Read a string at a dotted path; empty path or a non-string value yields "".
+/// Read the assistant's text out of a parsed provider body.
+///
+/// Two readers, selected by the WIRE SHAPE, never by provider name:
+///
+///   - block-array families declare a responseTextConfig and are read by
+///     DISCRIMINATOR, because array position is not stable — Opus 5 and
+///     Sonnet 5 think by default, so content[0] is a thinking block (BUG-053);
+///   - scalar families declare none, and null SELECTS the fixed-path reader.
+///
+/// An empty result is a real answer, not a failure: every tool-use turn carries
+/// no text block at all. finish_reason is what says why.
+fn extractResponseText(
+    arena: std.mem.Allocator,
+    raw: json.Value,
+    provider: providers.ProviderName,
+    chat_wire_shape: []const u8,
+) ![]const u8 {
+    const cfg = response_paths.responseTextConfig(chat_wire_shape) orelse
+        return stringAt(raw, response_paths.responseTextPath(provider));
+    const blocks = try json.matchingBlocks(arena, raw, cfg.blocks_path, cfg.marker_path, cfg.marker_value);
+    if (blocks.len == 0) return "";
+    return stringAt(blocks[0], cfg.value_path);
+}
+
+/// `extractResponseText`'s inverse, driven by the SAME config so the two cannot
+/// drift apart.
+///
+/// The marker is WRITTEN, not just tested. Emitting only the value path would
+/// produce {"content":[{"text":"pong"}]} — a body with no type discriminator,
+/// which the reader above then finds no matching block in. That is the ADR-076
+/// fixed point breaking, and it is why textMarkerValue is documented as a
+/// write instruction rather than a read predicate.
+fn encodeResponseText(
+    arena: std.mem.Allocator,
+    raw: *json.Value,
+    provider: providers.ProviderName,
+    chat_wire_shape: []const u8,
+    text: []const u8,
+) !void {
+    const cfg = response_paths.responseTextConfig(chat_wire_shape) orelse {
+        try json.setWirePath(arena, raw, response_paths.responseTextPath(provider), .{ .string = text });
+        return;
+    };
+    const block = try std.fmt.allocPrint(arena, "{s}[0]", .{cfg.blocks_path});
+    if (cfg.marker_value.len > 0) {
+        const marker = try std.fmt.allocPrint(arena, "{s}.{s}", .{ block, cfg.marker_path });
+        try json.setWirePath(arena, raw, marker, .{ .string = cfg.marker_value });
+    }
+    const value = try std.fmt.allocPrint(arena, "{s}.{s}", .{ block, cfg.value_path });
+    try json.setWirePath(arena, raw, value, .{ .string = text });
+}
+
 fn stringAt(raw: json.Value, path: []const u8) []const u8 {
     if (path.len == 0) return "";
     const v = json.getPath(raw, path) orelse return "";
@@ -167,7 +219,7 @@ pub fn decodeResponse(
     const cache = caching.cacheUsagePaths(provider);
 
     return .{
-        .content = try arena.dupe(u8, stringAt(raw, response_paths.responseTextPath(provider))),
+        .content = try arena.dupe(u8, try extractResponseText(arena, raw, provider, chat_wire_shape)),
         .finish_reason = try dupOptString(arena, stringAt(raw, ps.finish_reason_path)),
         .finish_message = try dupOptString(arena, stringAt(raw, ps.finish_message_path)),
         .err = try detectError(arena, raw, ps),
@@ -216,7 +268,7 @@ pub fn encodeResponse(
     const cache = caching.cacheUsagePaths(provider);
 
     var raw = json.object();
-    try json.setWirePath(arena, &raw, response_paths.responseTextPath(provider), .{ .string = resp.content });
+    try encodeResponseText(arena, &raw, provider, chat_wire_shape, resp.content);
     try json.setWirePath(arena, &raw, usage_paths.input, json.wireInt(resp.usage.input));
     try json.setWirePath(arena, &raw, usage_paths.output, json.wireInt(resp.usage.output));
     try json.setWirePath(arena, &raw, cache.write, json.wireInt(resp.usage.cache_write));
