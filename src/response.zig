@@ -72,7 +72,6 @@ pub const Response = struct {
     provider_turn: ?provider_turn.ProviderTurn = null,
 };
 
-/// Read a string at a dotted path; empty path or a non-string value yields "".
 /// Read the assistant's text out of a parsed provider body.
 ///
 /// Two readers, selected by the WIRE SHAPE, never by provider name:
@@ -125,6 +124,7 @@ fn encodeResponseText(
     try json.setWirePath(arena, raw, value, .{ .string = text });
 }
 
+/// Read a string at a dotted path; empty path or a non-string value yields "".
 fn stringAt(raw: json.Value, path: []const u8) []const u8 {
     if (path.len == 0) return "";
     const v = json.getPath(raw, path) orelse return "";
@@ -204,12 +204,31 @@ pub const EncodeError = error{FieldNotInvertible} || std.mem.Allocator.Error;
 /// wire seam is Value-typed at both ends and the send seam does the
 /// stringify/parse (ADR-069 ZIG-002). `json.parse` / `json.stringify` are public
 /// for a caller holding bytes.
+/// Fill in an unspecified wire shape with the provider's DEFAULT chat protocol.
+///
+/// Callers that decode a body they know is Chat Completions — batch result
+/// lines, chiefly — pass "" to mean "not the Responses envelope". Harmless
+/// while the shape only chose between the Responses arm and the provider's
+/// declared paths; NOT harmless once it also selects the TEXT READER, because
+/// "" resolved to no config, which is the positional reader BUG-053 removed.
+/// Batched Anthropic replies with a leading thinking block decoded to "" long
+/// after the send path was fixed.
+///
+/// Resolving here keeps N=1. ADR-055 requires every provider's default protocol
+/// to be a Chat Completions family, so this can never resolve INTO the
+/// Responses arm.
+fn resolveChatWireShape(provider: ProviderName, chat_wire_shape: []const u8) []const u8 {
+    if (chat_wire_shape.len > 0) return chat_wire_shape;
+    return providers.spec(provider).chat_wire_shape;
+}
+
 pub fn decodeResponse(
     arena: std.mem.Allocator,
     provider: ProviderName,
-    chat_wire_shape: []const u8,
+    chat_wire_shape_raw: []const u8,
     raw: json.Value,
 ) !Response {
+    const chat_wire_shape = resolveChatWireShape(provider, chat_wire_shape_raw);
     if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) {
         return parseResponsesEnvelope(arena, raw);
     }
@@ -255,9 +274,10 @@ pub fn decodeResponse(
 pub fn encodeResponse(
     arena: std.mem.Allocator,
     provider: ProviderName,
-    chat_wire_shape: []const u8,
+    chat_wire_shape_raw: []const u8,
     resp: Response,
 ) EncodeError!json.Value {
+    const chat_wire_shape = resolveChatWireShape(provider, chat_wire_shape_raw);
     try guardOneWayFields(provider, resp);
     if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) {
         return encodeResponsesEnvelope(arena, resp);
