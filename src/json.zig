@@ -108,6 +108,51 @@ pub fn getPath(root: Value, path: []const u8) ?Value {
     return cur;
 }
 
+/// Elements of the array at `blocks_path` that the marker identifies, in wire
+/// order. The single primitive behind every "which blocks in this response are
+/// of kind X" question — text extraction and tool-call extraction both run
+/// through it, so the two cannot come to disagree about what an array element
+/// is.
+///
+/// Marker semantics are exactly the generated config contract:
+///
+///   marker_path empty                    homogeneous array; every element matches
+///   marker_path set, marker_value empty  matches if the key is PRESENT
+///   both set                             matches if the key EQUALS the value
+///
+/// Presence rather than equality is not a shortcut: a Bedrock ContentBlock and
+/// a Gemini Part are UNIONS whose text member carries no type key at all, so an
+/// equality test there would match nothing.
+///
+/// Navigation reuses `getPath`, so there is no second path grammar here. The
+/// returned SLICE is allocated from `arena` (toOwnedSlice); its ELEMENTS
+/// borrow from `root` and are not copied. Arena callers free nothing; a
+/// caller passing any other allocator owns the slice.
+pub fn matchingBlocks(
+    arena: std.mem.Allocator,
+    root: Value,
+    blocks_path: []const u8,
+    marker_path: []const u8,
+    marker_value: []const u8,
+) ![]Value {
+    var out: std.ArrayList(Value) = .empty;
+    const arr = getPath(root, blocks_path) orelse return out.toOwnedSlice(arena);
+    if (std.meta.activeTag(arr) != .array) return out.toOwnedSlice(arena);
+
+    for (arr.array.items) |elem| {
+        if (std.meta.activeTag(elem) != .object) continue;
+        if (marker_path.len > 0) {
+            const marker = elem.object.get(marker_path) orelse continue;
+            if (marker_value.len > 0) {
+                if (std.meta.activeTag(marker) != .string) continue;
+                if (!std.mem.eql(u8, marker.string, marker_value)) continue;
+            }
+        }
+        try out.append(arena, elem);
+    }
+    return out.toOwnedSlice(arena);
+}
+
 /// Place `value` at a dotted `path` WITH array indices — the navigate-or-create
 /// inverse of `getPath`, walking the identical generated path strings (ADR-076
 /// SYM-005). Intermediate objects and array elements are created as it
@@ -241,6 +286,54 @@ fn numericValue(v: Value) ?f64 {
         else => null,
     };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

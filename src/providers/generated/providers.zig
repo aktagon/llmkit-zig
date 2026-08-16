@@ -169,7 +169,7 @@ pub fn spec(name: ProviderName) ProviderSpec {
             .role_mappings = &.{ .{ .from = "assistant", .to = "assistant" }, .{ .from = "user", .to = "user" } },
             .usage_input_path = "usage.input_tokens",
             .usage_output_path = "usage.output_tokens",
-            .reasoning_tokens_path = "",
+            .reasoning_tokens_path = "usage.output_tokens_details.thinking_tokens",
             .finish_reason_path = "stop_reason",
             .finish_message_path = "",
             .stream_finish_reason_path = "message_stop:stop_reason",
