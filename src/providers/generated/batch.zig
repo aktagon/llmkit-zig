@@ -18,6 +18,9 @@ pub const BatchDef = struct {
     endpoint_path: []const u8,
     item_body_field: []const u8,
     result_body_path: []const u8,
+    result_key_path: []const u8,
+    result_status_path: []const u8,
+    result_error_path: []const u8,
     lifecycle: ?ResourceLifecycleDef,
 };
 
@@ -32,6 +35,9 @@ pub fn batchConfig(provider: ProviderName) ?BatchDef {
             .endpoint_path = "",
             .item_body_field = "params",
             .result_body_path = "result.message",
+            .result_key_path = "custom_id",
+            .result_status_path = "result.type",
+            .result_error_path = "result.error.error.message",
             .lifecycle =
                 .{
                     .create_endpoint = "/v1/messages/batches",
@@ -56,6 +62,9 @@ pub fn batchConfig(provider: ProviderName) ?BatchDef {
             .endpoint_path = "",
             .item_body_field = "",
             .result_body_path = "",
+            .result_key_path = "",
+            .result_status_path = "",
+            .result_error_path = "",
             .lifecycle = null,
         },
         .openai => .{
@@ -67,6 +76,9 @@ pub fn batchConfig(provider: ProviderName) ?BatchDef {
             .endpoint_path = "/v1/chat/completions",
             .item_body_field = "",
             .result_body_path = "response.body",
+            .result_key_path = "custom_id",
+            .result_status_path = "",
+            .result_error_path = "error.message",
             .lifecycle =
                 .{
                     .create_endpoint = "/v1/batches",
