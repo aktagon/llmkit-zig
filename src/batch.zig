@@ -10,12 +10,13 @@
 //!     witness). The request-wire `batch-multimodal-anthropic` golden (+ its
 //!     `.headers.json`) asserts these.
 //!   - `parseBatchResults` (INBOUND): a completed batch's results file (one JSONL
-//!     line per request) -> the successful `Response` subset, reading each line's
-//!     body at the generated `result_body_path` (Anthropic `result.message`,
-//!     OpenAI `response.body`) and SKIPPING errored/malformed lines (a throwing
-//!     parser would destroy a completed, possibly hours-long batch — HANDOFF-036
-//!     A1). The response-wire `batch-results-anthropic` golden asserts the
-//!     projection.
+//!     line per request) -> one `Response` per request at the index its
+//!     `custom_id` names (BUG-072), reading each line's body at the generated
+//!     `result_body_path` (Anthropic `result.message`, OpenAI `response.body`);
+//!     an errored line keeps its slot as a failed Response, never throws (a
+//!     throwing parser would destroy a completed, possibly hours-long batch —
+//!     HANDOFF-036 A1). The response-wire `batch-results-anthropic` golden
+//!     asserts the projection.
 //!   - `BatchHandle.poll` (LIFECYCLE): the Job engine's batch adapter — poll the
 //!     batch status, classify (done/error from the generated lifecycle facts),
 //!     and on success fetch the results (OpenAI two-hop via `output_file_id` ->
@@ -97,30 +98,86 @@ fn addUnique(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), value: 
     try list.append(arena, value);
 }
 
-/// Parse a completed batch's results file (JSONL, one line per request) into the
-/// successful `Response` subset. Each line's chat body is read at the generated
-/// `result_body_path`; a line missing it (an errored result) or unparseable is
-/// SKIPPED (never throws — a completed batch's partial results are still
-/// valuable). No SDK matches by `custom_id`; all assume line order.
+/// Parse a completed batch's results file (JSONL) into one `Response` per
+/// submitted request, at that request's index (BUG-072).
+///
+/// Providers return result lines in any order, so a line is placed by the
+/// request id at `result_key_path`: "req-N" goes to index N. A line whose body
+/// is missing at `result_body_path` is a failed request; it keeps its slot as a
+/// Response with empty content, `finish_reason` from `result_status_path`
+/// ("error" when the provider has no status) and `finish_message` from
+/// `result_error_path`. An index with no line gets `finish_reason` "missing".
+/// Lines whose id is not "req-N" (a batch created outside llmkit, or a repeated
+/// id) follow the indexed slots in file order. A line that is not JSON cannot
+/// be placed and is skipped; its index reads "missing". Never throws on a bad
+/// line — a completed batch's partial results are still valuable.
 pub fn parseBatchResults(arena: std.mem.Allocator, provider: providers.ProviderName, results: []const u8) ![]Response {
     const bd = batch_defs.batchConfig(provider) orelse return error.UnsupportedWireShape;
-    const body_path = bd.result_body_path;
 
-    var out: std.ArrayList(Response) = .empty;
+    var slots: std.ArrayList(?Response) = .empty;
+    var unkeyed: std.ArrayList(Response) = .empty;
     var lines = std.mem.splitScalar(u8, results, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \r\t");
         if (line.len == 0) continue;
 
         const parsed = std.json.parseFromSliceLeaky(json.Value, arena, line, .{}) catch continue;
-        const body = if (body_path.len > 0) (json.getPath(parsed, body_path) orelse continue) else parsed;
+        const resp = try parseBatchResultLine(arena, provider, bd, parsed);
 
+        const index: ?usize = if (bd.result_key_path.len > 0) batchRequestIndex(json.getPath(parsed, bd.result_key_path)) else null;
+        if (index == null or (index.? < slots.items.len and slots.items[index.?] != null)) {
+            try unkeyed.append(arena, resp);
+            continue;
+        }
+        while (slots.items.len <= index.?) try slots.append(arena, null);
+        slots.items[index.?] = resp;
+    }
+
+    var out = try std.ArrayList(Response).initCapacity(arena, slots.items.len + unkeyed.items.len);
+    for (slots.items) |slot| {
+        out.appendAssumeCapacity(slot orelse .{ .content = "", .finish_reason = "missing", .usage = .{} });
+    }
+    out.appendSliceAssumeCapacity(unkeyed.items);
+    return out.toOwnedSlice(arena);
+}
+
+/// One result line -> its `Response`: the decoded chat body when the line
+/// carries one at `result_body_path`, otherwise a failed Response carrying the
+/// provider's result status and error message.
+fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderName, bd: batch_defs.BatchDef, line: json.Value) !Response {
+    const body = if (bd.result_body_path.len > 0) json.getPath(line, bd.result_body_path) else line;
+    if (body) |b| if (b == .object) {
         // Batch is Chat-Completions-only (ADR-055 declares no batch Responses
         // protocol), so the wire shape is explicitly empty, never derived.
-        const resp = response.decodeResponse(arena, provider, "", body) catch continue;
-        try out.append(arena, resp);
-    }
-    return out.toOwnedSlice(arena);
+        if (response.decodeResponse(arena, provider, "", b)) |resp| return resp else |_| {}
+    };
+
+    const status = if (bd.result_status_path.len > 0) stringAtPath(line, bd.result_status_path) else null;
+    const message = if (bd.result_error_path.len > 0) stringAtPath(line, bd.result_error_path) else null;
+    return .{
+        .content = "",
+        .finish_reason = try arena.dupe(u8, status orelse "error"),
+        .finish_message = if (message) |m| try arena.dupe(u8, m) else null,
+        .usage = .{},
+    };
+}
+
+/// The non-empty string at `path`, or null when it does not resolve to one.
+fn stringAtPath(root: json.Value, path: []const u8) ?[]const u8 {
+    const v = json.getPath(root, path) orelse return null;
+    if (v != .string or v.string.len == 0) return null;
+    return v.string;
+}
+
+/// The index N of a request id "req-N" this SDK assigned, or null for any
+/// other id (or no id).
+fn batchRequestIndex(id: ?json.Value) ?usize {
+    const v = id orelse return null;
+    if (v != .string or !std.mem.startsWith(u8, v.string, "req-")) return null;
+    const digits = v.string["req-".len..];
+    if (digits.len == 0) return null;
+    for (digits) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(usize, digits, 10) catch null;
 }
 
 /// A handle to a submitted batch — the Job engine's batch adapter target. Carries
@@ -148,6 +205,15 @@ pub const BatchHandle = struct {
     /// loop over `poll`, not a second lifecycle implementation). Gives up at the
     /// configured deadline with the typed `error.PollTimeout` sentinel; a
     /// provider FAILURE is a `JobStatus{.failed}`, not that error.
+    ///
+    /// On success the result holds one `Response` per prompt, at the prompt's
+    /// index. A failed request keeps its slot: empty content, `finish_reason`
+    /// set to the provider's result status ("errored", "expired", "canceled";
+    /// "error" when the provider has none) and `finish_message` set to the
+    /// provider's error message. A request with no result line reads
+    /// `finish_reason` "missing". Results whose request id is not one this SDK
+    /// assigned (a batch created elsewhere, resumed by id) follow the indexed
+    /// ones in file order.
     pub fn wait(self: BatchHandle, arena: std.mem.Allocator) !job.JobStatus([]Response) {
         return job.wait(BatchAdapter, .{ .handle = self }, self.io orelse return error.NoIo, arena);
     }
@@ -258,6 +324,34 @@ fn replaceId(arena: std.mem.Allocator, template: []const u8, id: []const u8) ![]
     const idx = std.mem.indexOf(u8, template, "{id}") orelse return template;
     return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ template[0..idx], id, template[idx + "{id}".len ..] });
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

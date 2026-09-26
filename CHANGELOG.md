@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Batch results are matched to prompts by request id, not by line order.**
+  Providers return batch results in any order, and a failed request used to be
+  dropped, so later answers moved up one place. Waiting on a batch now returns
+  one response per prompt, at the prompt's index. A failed request keeps its
+  slot with empty text, the provider's result status as the finish reason
+  (`errored`, `expired`, `canceled`, or `error`) and the provider's error
+  message as the finish message. A request with no result reads finish reason
+  `missing`. Results for request ids this SDK did not assign follow in file
+  order.
+
 - Streaming against a query-authenticated provider (Google) sent no credential:
   the stream path assembled its URL directly instead of splicing the `?key=`
   the provider's auth scheme requires. All send paths now share one URL
