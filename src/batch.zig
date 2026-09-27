@@ -9,19 +9,20 @@
 //!     the files-api beta on the CREATE request (BUG-017 / the batch-modality
 //!     witness). The request-wire `batch-multimodal-anthropic` golden (+ its
 //!     `.headers.json`) asserts these.
-//!   - `parseBatchResults` (INBOUND): a completed batch's results file (one JSONL
-//!     line per request) -> one `Response` per request at the index its
-//!     `custom_id` names (BUG-072), reading each line's body at the generated
-//!     `result_body_path` (Anthropic `result.message`, OpenAI `response.body`);
-//!     an errored line keeps its slot as a failed Response, never throws (a
-//!     throwing parser would destroy a completed, possibly hours-long batch —
-//!     HANDOFF-036 A1). The response-wire `batch-results-anthropic` golden
-//!     asserts the projection.
+//!   - `parseBatchResults` (INBOUND): a completed batch's result sources (JSONL,
+//!     one line per request) -> one `Response` per request at the index its
+//!     `custom_id` names (BUG-072), classified by the provider's success signal
+//!     and sized by the status body's request count (HANDOFF-078); a failed
+//!     line keeps its slot as a failed Response, never throws (a throwing
+//!     parser would destroy a completed, possibly hours-long batch — HANDOFF-036
+//!     A1). The response-wire `batch-results-{anthropic,openai}` goldens assert
+//!     the projection.
 //!   - `BatchHandle.poll` (LIFECYCLE): the Job engine's batch adapter — poll the
 //!     batch status, classify (done/error from the generated lifecycle facts),
-//!     and on success fetch the results (OpenAI two-hop via `output_file_id` ->
-//!     file content; Anthropic direct results endpoint). The lifecycle-wire
-//!     `batch-{succeeded,failed}` goldens assert the normalized JobStatus.
+//!     and on success fetch every result source (Anthropic results endpoint;
+//!     OpenAI output file then error file, ids read from the status body). The
+//!     lifecycle-wire `batch-{succeeded,failed}` goldens assert the normalized
+//!     JobStatus.
 //! All three read the generated `BatchDef` / `ResourceLifecycleDef`, never a
 //! provider name. Mirrors `rust/src/batch.rs` / `go/batch.go`.
 
@@ -79,7 +80,7 @@ pub fn buildBatchBody(
         }
 
         var item = json.object();
-        try json.set(arena, &item, "custom_id", .{ .string = try std.fmt.allocPrint(arena, "req-{d}", .{i}) });
+        try json.set(arena, &item, "custom_id", .{ .string = try std.fmt.allocPrint(arena, batch_defs.batch_request_id_prefix ++ "{d}", .{i}) });
         const field = if (bd.item_body_field.len > 0) bd.item_body_field else "params";
         try json.set(arena, &item, field, item_body);
         try items.array.append(item);
@@ -98,83 +99,171 @@ fn addUnique(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), value: 
     try list.append(arena, value);
 }
 
-/// Parse a completed batch's results file (JSONL) into one `Response` per
-/// submitted request, at that request's index (BUG-072).
+/// Parse a completed batch's result sources (JSONL files, in the order the
+/// lifecycle declares them) into one `Response` per submitted request, at that
+/// request's index (BUG-072, HANDOFF-078).
 ///
 /// Providers return result lines in any order, so a line is placed by the
-/// request id at `result_key_path`: "req-N" goes to index N. A line whose body
-/// is missing at `result_body_path` is a failed request; it keeps its slot as a
-/// Response with empty content, `finish_reason` from `result_status_path`
-/// ("error" when the provider has no status) and `finish_message` from
-/// `result_error_path`. An index with no line gets `finish_reason` "missing".
-/// Lines whose id is not "req-N" (a batch created outside llmkit, or a repeated
-/// id) follow the indexed slots in file order. A line that is not JSON cannot
-/// be placed and is skipped; its index reads "missing". Never throws on a bad
-/// line — a completed batch's partial results are still valuable.
-pub fn parseBatchResults(arena: std.mem.Allocator, provider: providers.ProviderName, results: []const u8) ![]Response {
+/// request id at `result_key_path`: `batch_request_id_prefix` + N goes to slot
+/// N. A line succeeded when the value at `result_status_path` is one of
+/// `result_success_values` (or the provider declares no status path) and its
+/// body at `result_body_path` is an object that decodes. A failed line keeps
+/// its slot with empty content, `finish_reason` from the first
+/// `result_reason_paths` entry that resolves (`batch_slot_error` when none
+/// does) and `finish_message` from the first `result_message_paths` entry.
+///
+/// `count` (the status body's request count) fixes the number of slots; a line
+/// whose N is out of range then follows the slots. Without a count the slots
+/// run to the highest N. When one slot is claimed twice, a success replaces a
+/// failure, a failure never replaces a success, and a same-class duplicate
+/// follows the slots. Lines whose id is not a request id this SDK assigned
+/// follow the slots in source order. An empty slot reads `batch_slot_missing`.
+/// A line that is not JSON is skipped. Never throws on a bad line: a completed
+/// batch's partial results are still valuable.
+pub fn parseBatchResults(
+    arena: std.mem.Allocator,
+    provider: providers.ProviderName,
+    sources: []const []const u8,
+    count: ?usize,
+) ![]Response {
     const bd = batch_defs.batchConfig(provider) orelse return error.UnsupportedWireShape;
 
-    var slots: std.ArrayList(?Response) = .empty;
+    var slots: std.ArrayList(?BatchSlot) = .empty;
+    if (count) |n| try slots.appendNTimes(arena, null, n);
     var unkeyed: std.ArrayList(Response) = .empty;
-    var lines = std.mem.splitScalar(u8, results, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \r\t");
-        if (line.len == 0) continue;
 
-        const parsed = std.json.parseFromSliceLeaky(json.Value, arena, line, .{}) catch continue;
-        const resp = try parseBatchResultLine(arena, provider, bd, parsed);
+    for (sources) |source| {
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \r\t");
+            if (line.len == 0) continue;
 
-        const index: ?usize = if (bd.result_key_path.len > 0) batchRequestIndex(json.getPath(parsed, bd.result_key_path)) else null;
-        if (index == null or (index.? < slots.items.len and slots.items[index.?] != null)) {
-            try unkeyed.append(arena, resp);
-            continue;
+            const parsed = std.json.parseFromSliceLeaky(json.Value, arena, line, .{}) catch continue;
+            const slot = try parseBatchResultLine(arena, provider, bd, parsed);
+
+            var index: ?usize = if (bd.result_key_path.len > 0) batchRequestIndex(json.getPath(parsed, bd.result_key_path)) else null;
+            if (index != null and count != null and index.? >= count.?) index = null;
+            const i = index orelse {
+                try unkeyed.append(arena, slot.resp);
+                continue;
+            };
+            while (slots.items.len <= i) try slots.append(arena, null);
+
+            if (slots.items[i]) |existing| {
+                if (slot.succeeded and !existing.succeeded) {
+                    slots.items[i] = slot;
+                } else if (existing.succeeded and !slot.succeeded) {
+                    // The request succeeded; a failed duplicate adds nothing.
+                } else {
+                    try unkeyed.append(arena, slot.resp);
+                }
+            } else slots.items[i] = slot;
         }
-        while (slots.items.len <= index.?) try slots.append(arena, null);
-        slots.items[index.?] = resp;
     }
 
     var out = try std.ArrayList(Response).initCapacity(arena, slots.items.len + unkeyed.items.len);
     for (slots.items) |slot| {
-        out.appendAssumeCapacity(slot orelse .{ .content = "", .finish_reason = "missing", .usage = .{} });
+        out.appendAssumeCapacity(if (slot) |s| s.resp else .{ .content = "", .finish_reason = batch_defs.batch_slot_missing, .usage = .{} });
     }
     out.appendSliceAssumeCapacity(unkeyed.items);
     return out.toOwnedSlice(arena);
 }
 
-/// One result line -> its `Response`: the decoded chat body when the line
-/// carries one at `result_body_path`, otherwise a failed Response carrying the
-/// provider's result status and error message.
-fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderName, bd: batch_defs.BatchDef, line: json.Value) !Response {
-    const body = if (bd.result_body_path.len > 0) json.getPath(line, bd.result_body_path) else line;
-    if (body) |b| if (b == .object) {
-        // Batch is Chat-Completions-only (ADR-055 declares no batch Responses
-        // protocol), so the wire shape is explicitly empty, never derived.
-        if (response.decodeResponse(arena, provider, "", b)) |resp| return resp else |_| {}
-    };
+/// One placed result line and whether it carried a successful response.
+const BatchSlot = struct { resp: Response, succeeded: bool };
 
-    const status = if (bd.result_status_path.len > 0) stringAtPath(line, bd.result_status_path) else null;
-    const message = if (bd.result_error_path.len > 0) stringAtPath(line, bd.result_error_path) else null;
-    return .{
+/// One result line -> its slot: the decoded chat body when the line carries
+/// the provider's success signal and a decodable body, otherwise a failed
+/// Response carrying the provider's reason and message.
+fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderName, bd: batch_defs.BatchDef, line: json.Value) !BatchSlot {
+    if (try succeededLine(arena, bd, line)) {
+        const body = if (bd.result_body_path.len > 0) json.getPath(line, bd.result_body_path) else line;
+        if (body) |b| if (b == .object) {
+            // Batch is Chat-Completions-only (ADR-055 declares no batch Responses
+            // protocol), so the wire shape is explicitly empty, never derived.
+            if (response.decodeResponse(arena, provider, "", b)) |resp| return .{ .resp = resp, .succeeded = true } else |_| {}
+        };
+    }
+
+    const reason = try firstPath(arena, line, bd.result_reason_paths);
+    const message = try firstPath(arena, line, bd.result_message_paths);
+    return .{ .resp = .{
         .content = "",
-        .finish_reason = try arena.dupe(u8, status orelse "error"),
-        .finish_message = if (message) |m| try arena.dupe(u8, m) else null,
+        .finish_reason = reason orelse batch_defs.batch_slot_error,
+        .finish_message = message,
         .usage = .{},
-    };
+    }, .succeeded = false };
 }
 
-/// The non-empty string at `path`, or null when it does not resolve to one.
-fn stringAtPath(root: json.Value, path: []const u8) ?[]const u8 {
+/// The body of a result line that carries the provider's success signal, or
+/// null for a failed line. The symmetry suite round-trips exactly these bodies,
+/// so it classifies lines by the same rule as the parser.
+pub fn succeededBody(arena: std.mem.Allocator, provider: providers.ProviderName, line: json.Value) !?json.Value {
+    const bd = batch_defs.batchConfig(provider) orelse return error.UnsupportedWireShape;
+    if (!try succeededLine(arena, bd, line)) return null;
+    if (bd.result_body_path.len == 0) return line;
+    return json.getPath(line, bd.result_body_path);
+}
+
+/// Whether `line` carries the provider's success signal: no status path is
+/// declared, or the value there (a number rendered as decimal) is one of
+/// `result_success_values`.
+fn succeededLine(arena: std.mem.Allocator, bd: batch_defs.BatchDef, line: json.Value) !bool {
+    if (bd.result_status_path.len == 0) return true;
+    const status = try scalarAtPath(arena, line, bd.result_status_path) orelse return false;
+    for (bd.result_success_values) |v| if (std.mem.eql(u8, v, status)) return true;
+    return false;
+}
+
+/// The first of `paths` that resolves to a non-empty scalar, rendered as a
+/// string (arena-owned), or null when none does.
+fn firstPath(arena: std.mem.Allocator, root: json.Value, paths: []const []const u8) !?[]const u8 {
+    for (paths) |path| if (try scalarAtPath(arena, root, path)) |v| return v;
+    return null;
+}
+
+/// The non-empty scalar at `path` rendered as a string (JSON number 200 ->
+/// "200"), or null when the path does not resolve to one.
+fn scalarAtPath(arena: std.mem.Allocator, root: json.Value, path: []const u8) !?[]const u8 {
     const v = json.getPath(root, path) orelse return null;
-    if (v != .string or v.string.len == 0) return null;
-    return v.string;
+    const s: []const u8 = switch (v) {
+        .string => |x| x,
+        .number_string => |x| x,
+        .integer => |x| try std.fmt.allocPrint(arena, "{d}", .{x}),
+        .float => |x| try std.fmt.allocPrint(arena, "{d}", .{x}),
+        .bool => |x| if (x) "true" else "false",
+        else => return null,
+    };
+    if (s.len == 0) return null;
+    return try arena.dupe(u8, s);
 }
 
-/// The index N of a request id "req-N" this SDK assigned, or null for any
-/// other id (or no id).
+/// The sum of the numbers at `paths` in the batch status body, or null when no
+/// path resolves to a number.
+fn batchRequestCount(status: json.Value, paths: []const []const u8) ?usize {
+    var total: usize = 0;
+    var found = false;
+    for (paths) |path| {
+        const v = json.getPath(status, path) orelse continue;
+        const n: i64 = switch (v) {
+            .integer => |x| x,
+            .float => |x| @intFromFloat(x),
+            else => continue,
+        };
+        if (n < 0) continue;
+        total += @intCast(n);
+        found = true;
+    }
+    return if (found) total else null;
+}
+
+/// The index N of a request id `batch_request_id_prefix` + N this SDK
+/// assigned, or null for any other id (or no id).
 fn batchRequestIndex(id: ?json.Value) ?usize {
+    const prefix = batch_defs.batch_request_id_prefix;
     const v = id orelse return null;
-    if (v != .string or !std.mem.startsWith(u8, v.string, "req-")) return null;
-    const digits = v.string["req-".len..];
+    if (v != .string or !std.mem.startsWith(u8, v.string, prefix)) return null;
+    const digits = v.string[prefix.len..];
     if (digits.len == 0) return null;
     for (digits) |c| if (!std.ascii.isDigit(c)) return null;
     return std.fmt.parseInt(usize, digits, 10) catch null;
@@ -208,12 +297,12 @@ pub const BatchHandle = struct {
     ///
     /// On success the result holds one `Response` per prompt, at the prompt's
     /// index. A failed request keeps its slot: empty content, `finish_reason`
-    /// set to the provider's result status ("errored", "expired", "canceled";
-    /// "error" when the provider has none) and `finish_message` set to the
-    /// provider's error message. A request with no result line reads
-    /// `finish_reason` "missing". Results whose request id is not one this SDK
+    /// set to the provider's reason ("errored", "expired", "batch_expired", ...;
+    /// `batch_slot_error` when the provider gives none) and `finish_message`
+    /// set to the provider's error message. A request with no result line reads
+    /// `batch_slot_missing`. Results whose request id is not one this SDK
     /// assigned (a batch created elsewhere, resumed by id) follow the indexed
-    /// ones in file order.
+    /// ones in source order.
     pub fn wait(self: BatchHandle, arena: std.mem.Allocator) !job.JobStatus([]Response) {
         return job.wait(BatchAdapter, .{ .handle = self }, self.io orelse return error.NoIo, arena);
     }
@@ -302,15 +391,25 @@ const BatchAdapter = struct {
 
     pub fn result(self: BatchAdapter, arena: std.mem.Allocator, pb: job.PollBody) !Out {
         const lc = self.lifecycle();
-        // Two paths: OpenAI reads an output_file_id then GETs the file content;
-        // Anthropic GETs the results endpoint directly (both from the facts).
-        const url = if (lc.result_file_id_path.len > 0) blk: {
-            const fid = pb.status(lc.result_file_id_path);
-            break :blk try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.file_content_endpoint, fid) });
-        } else try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.result_endpoint, self.handle.id) });
+        // Every result source the lifecycle declares, in order: the results
+        // endpoint (Anthropic), then the output and error files whose ids the
+        // status body names (OpenAI). A file whose id is absent is skipped.
+        var sources: std.ArrayList([]const u8) = .empty;
+        if (lc.result_endpoint.len > 0) {
+            const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.result_endpoint, self.handle.id) });
+            try sources.append(arena, (try self.get(arena, url)).body);
+        }
+        for ([_][]const u8{ lc.result_file_id_path, lc.error_file_id_path }) |id_path| {
+            const fid = pb.status(id_path);
+            if (fid.len == 0) continue;
+            const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.file_content_endpoint, fid) });
+            try sources.append(arena, (try self.get(arena, url)).body);
+        }
+        if (sources.items.len == 0) return error.NoBatchResultSource;
 
-        const resp = try self.get(arena, url);
-        return parseBatchResults(arena, self.handle.provider, resp.body);
+        const bd = batch_defs.batchConfig(self.handle.provider).?;
+        const count = batchRequestCount(pb.value, bd.request_count_paths);
+        return parseBatchResults(arena, self.handle.provider, sources.items, count);
     }
 
     fn get(self: BatchAdapter, arena: std.mem.Allocator, url: []const u8) !http.Response {
@@ -324,6 +423,51 @@ fn replaceId(arena: std.mem.Allocator, template: []const u8, id: []const u8) ![]
     const idx = std.mem.indexOf(u8, template, "{id}") orelse return template;
     return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ template[0..idx], id, template[idx + "{id}".len ..] });
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
