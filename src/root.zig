@@ -13,6 +13,7 @@ const image_gen = @import("providers/generated/image_gen.zig");
 const music_gen = @import("providers/generated/music_gen.zig");
 const speech_gen = @import("providers/generated/speech_gen.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
+const batch_config = @import("providers/generated/batch.zig");
 const provider_info = @import("providers/generated/provider_info.zig");
 pub const request = @import("request.zig");
 pub const response = @import("response.zig");
@@ -41,6 +42,10 @@ pub const Text = client.Text;
 pub const Agent = agent.Agent;
 pub const Tool = agent.Tool;
 pub const BatchHandle = batch.BatchHandle;
+// Batch slot values (ADR-091): the finish_reason of a batch slot with no result
+// line, and of a failed slot the provider gave no reason for.
+pub const batch_slot_missing = batch_config.batch_slot_missing;
+pub const batch_slot_error = batch_config.batch_slot_error;
 pub const Image = image.Image;
 pub const ImageResponse = image.ImageResponse;
 pub const ImageData = image.ImageData;

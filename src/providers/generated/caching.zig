@@ -20,6 +20,7 @@ pub const ResourceLifecycleDef = struct {
     result_endpoint: []const u8,
     result_response_path: []const u8,
     result_file_id_path: []const u8,
+    error_file_id_path: []const u8,
     file_content_endpoint: []const u8,
 };
 
@@ -60,6 +61,7 @@ pub fn cachingConfig(provider: ProviderName) ?CachingDef {
                     .result_endpoint = "",
                     .result_response_path = "",
                     .result_file_id_path = "",
+                    .error_file_id_path = "",
                     .file_content_endpoint = "",
                 },
         },
