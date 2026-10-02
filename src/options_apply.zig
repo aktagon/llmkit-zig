@@ -12,13 +12,18 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const options = @import("providers/generated/options.zig");
 
-/// Resolves `key`'s wire path for `provider`/`model`: a per-model override
-/// (ADR-024, longest matching pattern-prefix wins, an exact `id` match wins
-/// outright) takes precedence over the provider's default `supportedOptions`
-/// binding. Returns `null` when the provider does not support `key` at all —
-/// the caller must silently drop the option rather than send an unsupported
-/// key.
-pub fn resolveOptionKey(provider: providers.ProviderName, model: []const u8, key: options.OptionKey) ?[]const u8 {
+/// Resolves `key`'s wire path for `provider`/`model` under the effective chat
+/// wire shape `shape`. A wire-shape key (BUG-075) outranks everything: the
+/// Responses shape names MaxTokens `max_output_tokens` for every model. Next, a
+/// per-model override (ADR-024, longest matching pattern-prefix wins, an exact
+/// `id` match wins outright) takes precedence over the provider's default
+/// `supportedOptions` binding. Returns `null` when the provider does not
+/// support `key` at all — the caller must silently drop the option rather than
+/// send an unsupported key.
+pub fn resolveOptionKey(provider: providers.ProviderName, model: []const u8, shape: []const u8, key: options.OptionKey) ?[]const u8 {
+    for (options.wireShapeOptionOverrides(shape)) |ov| {
+        if (ov.key == key) return ov.json_key;
+    }
     var best_key: ?[]const u8 = null;
     var best_len: isize = -1;
     for (options.modelOptionOverrides(provider)) |ov| {
@@ -57,10 +62,11 @@ pub fn maybeInsert(
     root_extras: *json.Value,
     provider: providers.ProviderName,
     model: []const u8,
+    shape: []const u8,
     key: options.OptionKey,
     value: json.Value,
 ) !void {
-    const json_key = resolveOptionKey(provider, model, key) orelse return;
+    const json_key = resolveOptionKey(provider, model, shape, key) orelse return;
     try json.setPath(arena, opts_target, json_key, value);
 
     for (options.optionOverrides(provider)) |ov| {

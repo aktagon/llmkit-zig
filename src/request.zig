@@ -268,11 +268,10 @@ fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
 }
 
 /// The `ChatResponsesOpenAI` wire shape (ADR-055): the SAME flat message array
-/// as `ChatOpenAI`, but under the `input` key (not `messages`), and the
-/// output-token cap renamed `max_tokens` -> `max_output_tokens` (the Responses
-/// API rejects `max_tokens` with a 400). Every other field is shared with the
-/// Chat Completions shape. The rename is keyed on THIS wire shape, never a
-/// provider name — mirrors the Go/Rust post-build fixup.
+/// as `ChatOpenAI`, but under the `input` key (not `messages`). The
+/// output-token cap is `max_output_tokens` for every model; `applyOptions`
+/// reads that key from the generated wire-shape table (BUG-075). Every other
+/// field is shared with the Chat Completions shape.
 fn buildResponsesBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
     var body = json.object();
     if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
@@ -280,13 +279,6 @@ fn buildResponsesBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json
 
     // Options land flat on `body` (no wrapper), exactly as the ChatOpenAI shape.
     try applyOptions(arena, &body, &body, cfg);
-
-    // Responses names the cap `max_output_tokens`; rename in place (value-equal
-    // to the golden, order-independent).
-    if (body.object.get("max_tokens")) |v| {
-        try json.set(arena, &body, "max_output_tokens", v);
-        _ = body.object.swapRemove("max_tokens");
-    }
     return body;
 }
 
@@ -432,14 +424,18 @@ fn textParts(arena: std.mem.Allocator, text: []const u8) !json.Value {
 /// stays the true body — so options nest in the wrapper but root extras do not.
 fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.Value, cfg: ChatConfig) !void {
     const model = cfg.model orelse "";
+    // The effective wire shape selects wire-shape keys (BUG-075), e.g.
+    // Responses' max_output_tokens. buildChatBody already resolved it, so this
+    // cannot fail here.
+    const shape = try resolveWireShape(providers.spec(cfg.provider), cfg.protocol);
     var root_extras = json.object();
 
     if (cfg.temperature) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .temperature, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .temperature, .{ .float = v });
     if (cfg.top_p) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_p, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .top_p, .{ .float = v });
     if (cfg.top_k) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .top_k, .{ .integer = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .top_k, .{ .integer = v });
     // Effective max_tokens defaults to the provider's `default_max_tokens`
     // (mirrors Rust's `options.max_tokens.unwrap_or(config.default_max_tokens)`):
     // a user who never called `.maxTokens(...)` still emits the provider default,
@@ -447,21 +443,21 @@ fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.
     // placement apply to the defaulted value). Emit only when > 0.
     const max_tokens = cfg.max_tokens orelse providers.spec(cfg.provider).default_max_tokens;
     if (max_tokens > 0)
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .max_tokens, .{ .integer = max_tokens });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .max_tokens, .{ .integer = max_tokens });
     if (cfg.seed) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .seed, .{ .integer = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .seed, .{ .integer = v });
     if (cfg.frequency_penalty) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .frequency_penalty, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .frequency_penalty, .{ .float = v });
     if (cfg.presence_penalty) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .presence_penalty, .{ .float = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .presence_penalty, .{ .float = v });
     if (cfg.thinking_budget) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .thinking_budget, .{ .integer = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .thinking_budget, .{ .integer = v });
     if (cfg.reasoning_effort) |v|
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .reasoning_effort, .{ .string = v });
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .reasoning_effort, .{ .string = v });
     if (cfg.stop_sequences) |ss| {
         var arr = json.array(arena);
         for (ss) |s| try arr.array.append(.{ .string = s });
-        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, .stop_sequences, arr);
+        try opts.maybeInsert(arena, opts_target, &root_extras, cfg.provider, model, shape, .stop_sequences, arr);
     }
 
     try json.mergeRoot(arena, root, root_extras);
