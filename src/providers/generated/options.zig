@@ -1,6 +1,7 @@
 // Code generated — DO NOT EDIT.
 
 
+const std = @import("std");
 const ProviderName = @import("providers.zig").ProviderName;
 
 /// A generation parameter the SDK knows how to place on the wire.
@@ -45,6 +46,12 @@ pub const OptionOverrideDef = struct {
 pub const ModelOptionOverrideDef = struct {
     matcher_kind: []const u8, // "id" | "pattern"
     matcher_value: []const u8,
+    key: OptionKey,
+    json_key: []const u8,
+};
+
+/// A wire key a chat wire shape uses for one param, for every model (BUG-075).
+pub const WireShapeOptionOverrideDef = struct {
     key: OptionKey,
     json_key: []const u8,
 };
@@ -486,4 +493,14 @@ pub fn modelOptionOverrides(provider: ProviderName) []const ModelOptionOverrideD
         .yi => &.{},
         .zhipu => &.{},
     };
+}
+
+/// Wire keys a chat wire shape uses for generation params, for every model.
+/// They outrank `modelOptionOverrides` and the provider's supported-options
+/// table (BUG-075).
+pub fn wireShapeOptionOverrides(chat_wire_shape: []const u8) []const WireShapeOptionOverrideDef {
+    if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) return &.{
+        .{ .key = .max_tokens, .json_key = "max_output_tokens" },
+    };
+    return &.{};
 }
