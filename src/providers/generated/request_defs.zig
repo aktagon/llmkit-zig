@@ -365,7 +365,7 @@ pub fn fileUploadConfig(provider: ProviderName) ?FileUploadDef {
             .endpoint = "/v1/files",
             .field_name = "file",
             .extra_fields_json = "",
-            .beta_header = "files-api-2025-04-14",
+            .beta_header = "",
             .response_id_path = "id",
             .response_uri_path = "",
             .response_name_path = "filename",

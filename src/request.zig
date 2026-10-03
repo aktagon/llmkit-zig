@@ -133,10 +133,10 @@ pub const Header = http.Header;
 ///
 /// Scope (Slice F): the provider's required header (Anthropic ->
 /// `anthropic-version: 2023-06-01`) plus, when the request references an
-/// uploaded FILE Part (BUG-017), the file-reference beta header (Anthropic ->
-/// `anthropic-beta: files-api-2025-04-14`) selected from the generated
-/// `fileUploadConfig` def by the provider's file-upload FACT — never a
-/// provider-name switch. The `anthropic-beta` value is composed through
+/// uploaded FILE Part (BUG-017), the beta the provider's upload declares,
+/// selected from the generated `fileUploadConfig` def by the provider's
+/// file-upload FACT — never a provider-name switch. Anthropic declares none
+/// since its Files API left beta (BUG-078). The `anthropic-beta` value is composed through
 /// `appendBeta`, so the structured-output beta (a later slice) can compose onto
 /// the same header comma-separated rather than overwriting it. Mirrors Rust
 /// `build_request`'s header assembly (`build_auth_headers` + the file-beta
