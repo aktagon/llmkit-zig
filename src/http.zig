@@ -21,6 +21,7 @@ const std = @import("std");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 const middleware = @import("middleware.zig");
+const client_defaults = @import("providers/generated/client_defaults.zig");
 
 pub const Method = enum { GET, POST };
 
@@ -59,53 +60,10 @@ pub const Transport = struct {
     }
 };
 
-/// Production transport backed by `std.http.Client.fetch`. Holds the `Io` and a
-/// general-purpose allocator for the client's own buffers; the response body is
-/// duped into the per-request `arena` so it outlives the fetch. One-shot per
-/// call (no connection reuse) — the send paths are request/response, not
-/// long-lived streams, and `keep_alive` is left to the client default.
-pub const HttpTransport = struct {
-    gpa: std.mem.Allocator,
-    io: std.Io,
-
-    pub fn init(gpa: std.mem.Allocator, io: std.Io) HttpTransport {
-        return .{ .gpa = gpa, .io = io };
-    }
-
-    fn sendImpl(ptr: *anyopaque, arena: std.mem.Allocator, req: Request) anyerror!Response {
-        const self: *HttpTransport = @ptrCast(@alignCast(ptr));
-
-        var client: std.http.Client = .{ .allocator = self.gpa, .io = self.io };
-        defer client.deinit();
-
-        // Translate our headers to std.http.Header (same {name,value} shape).
-        var extra: std.ArrayList(std.http.Header) = .empty;
-        defer extra.deinit(self.gpa);
-        for (req.headers) |h|
-            try extra.append(self.gpa, .{ .name = h.name, .value = h.value });
-
-        var body_writer: std.Io.Writer.Allocating = .init(arena);
-        const result = try client.fetch(.{
-            .location = .{ .url = req.url },
-            .method = switch (req.method) {
-                .GET => .GET,
-                .POST => .POST,
-            },
-            .payload = if (req.body.len > 0) req.body else null,
-            .extra_headers = extra.items,
-            .response_writer = &body_writer.writer,
-        });
-
-        return .{
-            .status = @intFromEnum(result.status),
-            .body = body_writer.written(),
-        };
-    }
-
-    pub fn transport(self: *HttpTransport) Transport {
-        return .{ .ptr = self, .send_fn = sendImpl };
-    }
-};
+/// Production transport over `std.http.Client`, with the client's idle timeout
+/// (BUG-062). Lives in `http_transport.zig`; re-exported here so every terminal
+/// keeps naming `http.HttpTransport`.
+pub const HttpTransport = @import("http_transport.zig").HttpTransport;
 
 /// An in-memory transport that serves `responses` in order (the lifecycle-wire
 /// mock). Each `send` returns the next scripted response and records the request
@@ -199,6 +157,9 @@ pub const Ctx = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     base_url: ?[]const u8 = null,
+    /// How long a send waits for the next bytes from the provider, in
+    /// milliseconds (BUG-062). 0 disables it. Set by `Client.timeout`.
+    timeout_ms: u64 = client_defaults.default_timeout_ms,
     custom_headers: [max_custom_headers]Header = undefined,
     custom_header_count: usize = 0,
     middleware: [middleware.max_middleware]middleware.Middleware = undefined,
@@ -361,6 +322,10 @@ fn appendUnlessPresent(arena: std.mem.Allocator, list: *std.ArrayList(Header), h
         if (std.ascii.eqlIgnoreCase(existing.name, h.name)) return;
     try list.append(arena, h);
 }
+
+
+
+
 
 
 

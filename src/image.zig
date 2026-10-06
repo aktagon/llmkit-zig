@@ -189,7 +189,7 @@ pub const Image = struct {
         api_key: []const u8,
         prompt: []const u8,
     ) !ImageResponse {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.generateWith(self.ctx.transport orelse t.transport(), arena, api_key, prompt);
     }
 

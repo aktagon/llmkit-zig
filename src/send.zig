@@ -23,12 +23,14 @@ const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
 
 /// A non-2xx reply, or a body that is not the media type the caller expected.
-/// `ApiError` carries no detail because Zig errors have no payload; the parsed
+/// `Timeout` is the client's idle timeout expiring (BUG-062); every other
+/// transport failure is `ApiError`. `ApiError` carries no detail because Zig errors have no payload; the parsed
 /// provider envelope (message/type) travels on the capability's own response
 /// struct, which is where the other SDKs put it too.
 pub const SendError = error{
     ApiError,
     MiddlewareVeto,
+    Timeout,
 } || std.mem.Allocator.Error;
 
 /// One send. `endpoint` is joined to the client's base-URL override (else the
@@ -150,11 +152,12 @@ fn roundTrip(
         .url = url,
         .headers = headers,
         .body = body,
-    }) catch {
+    }) catch |err| {
+        const timed_out = err == error.Timeout;
         var ev = base;
-        middleware.setEventError(&ev, .{ .transport = "transport error" });
+        middleware.setEventError(&ev, .{ .transport = if (timed_out) "timeout" else "transport error" });
         middleware.firePost(mws, ev);
-        return error.ApiError;
+        return if (timed_out) error.Timeout else error.ApiError;
     };
 
     if (resp.status < 200 or resp.status >= 300) {

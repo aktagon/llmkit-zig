@@ -157,7 +157,7 @@ pub const Transcription = struct {
         mime: []const u8,
         bytes: []const u8,
     ) !TranscriptionResponse {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.transcribeWith(self.ctx.transport orelse t.transport(), arena, api_key, mime, bytes);
     }
 
@@ -213,7 +213,7 @@ pub const Transcription = struct {
         api_key: []const u8,
         audio_url: []const u8,
     ) ![]const u8 {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.submitWith(self.ctx.transport orelse t.transport(), arena, api_key, audio_url);
     }
 

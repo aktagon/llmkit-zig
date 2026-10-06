@@ -104,7 +104,7 @@ pub const Speech = struct {
         api_key: []const u8,
         text: []const u8,
     ) !SpeechResponse {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.generateWith(self.ctx.transport orelse t.transport(), arena, api_key, text);
     }
 

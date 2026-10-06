@@ -57,6 +57,17 @@ pub const Client = struct {
         return c;
     }
 
+    /// Set how long this client waits for the next bytes from the provider
+    /// before it fails the request with `error.Timeout` (last call wins). The
+    /// wait covers the response headers and every gap between body chunks, so
+    /// a long healthy stream never times out. 0 disables it. Default:
+    /// `default_timeout_ms` (600 s).
+    pub fn timeout(self: Client, ms: u64) Client {
+        var c = self;
+        c.ctx.timeout_ms = ms;
+        return c;
+    }
+
     /// Add a custom header sent with every request (ADR-052 parity with the
     /// other six SDKs' `AddHeader`/`addHeader`/`add_header`). Applied by
     /// `http.composeHeaders` at each send terminal, where a name that would
@@ -405,7 +416,7 @@ pub const Text = struct {
         api_key: []const u8,
         text_prompt: []const u8,
     ) !response_mod.Response {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.promptWith(self.ctx.transport orelse t.transport(), arena, api_key, text_prompt);
     }
 
@@ -449,7 +460,7 @@ pub const Text = struct {
         text_prompt: []const u8,
         on_chunk: ?stream_mod.ChunkCallback,
     ) !response_mod.Response {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.streamWith(self.ctx.transport orelse t.transport(), arena, api_key, text_prompt, on_chunk);
     }
 
@@ -476,7 +487,7 @@ pub const Text = struct {
         api_key: []const u8,
         prompts: []const []const u8,
     ) !batch_mod.BatchHandle {
-        var t = http.HttpTransport.init(self.ctx.gpa, self.ctx.io);
+        var t = http.HttpTransport.fromCtx(&self.ctx);
         return self.batchWith(self.ctx.transport orelse t.transport(), arena, api_key, prompts);
     }
 
