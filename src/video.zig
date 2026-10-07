@@ -143,8 +143,7 @@ pub const Video = struct {
         api_key: []const u8,
         prompt: []const u8,
     ) ![]const u8 {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.submitWith(self.ctx.transport orelse t.transport(), arena, api_key, prompt);
+        return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, prompt });
     }
 
     /// `submit` over an injected transport (the seam tests mock).

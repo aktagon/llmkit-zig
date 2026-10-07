@@ -129,8 +129,7 @@ pub const Agent = struct {
         api_key: []const u8,
         prompt: []const u8,
     ) !response.Response {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.chatWith(self.ctx.transport orelse t.transport(), arena, api_key, prompt);
+        return send.withTransport(&self.ctx, @TypeOf(self).chatWith, self, .{ arena, api_key, prompt });
     }
 
     /// `chat` over an injected transport (the seam tests mock).

@@ -74,8 +74,7 @@ pub const Upload = struct {
     /// .filename("q3.pdf").run(...)`) — the same terminal name Rust, Swift and
     /// Java use for this capability.
     pub fn run(self: Upload, arena: std.mem.Allocator, api_key: []const u8, bytes: []const u8) !File {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.runWith(self.ctx.transport orelse t.transport(), arena, api_key, bytes);
+        return send.withTransport(&self.ctx, @TypeOf(self).runWith, self, .{ arena, api_key, bytes });
     }
 
     /// `run` over an injected transport (the seam tests mock).

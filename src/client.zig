@@ -416,8 +416,7 @@ pub const Text = struct {
         api_key: []const u8,
         text_prompt: []const u8,
     ) !response_mod.Response {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.promptWith(self.ctx.transport orelse t.transport(), arena, api_key, text_prompt);
+        return send.withTransport(&self.ctx, @TypeOf(self).promptWith, self, .{ arena, api_key, text_prompt });
     }
 
     /// `prompt` over an injected transport (the seam tests mock).
@@ -460,8 +459,7 @@ pub const Text = struct {
         text_prompt: []const u8,
         on_chunk: ?stream_mod.ChunkCallback,
     ) !response_mod.Response {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.streamWith(self.ctx.transport orelse t.transport(), arena, api_key, text_prompt, on_chunk);
+        return send.withTransport(&self.ctx, @TypeOf(self).streamWith, self, .{ arena, api_key, text_prompt, on_chunk });
     }
 
     /// `stream` over an injected transport (ADR-013). Production passes an
@@ -487,8 +485,7 @@ pub const Text = struct {
         api_key: []const u8,
         prompts: []const []const u8,
     ) !batch_mod.BatchHandle {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.batchWith(self.ctx.transport orelse t.transport(), arena, api_key, prompts);
+        return send.withTransport(&self.ctx, @TypeOf(self).batchWith, self, .{ arena, api_key, prompts });
     }
 
     /// `batch` over an injected transport (the seam the lifecycle-wire driver

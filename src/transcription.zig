@@ -157,8 +157,7 @@ pub const Transcription = struct {
         mime: []const u8,
         bytes: []const u8,
     ) !TranscriptionResponse {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.transcribeWith(self.ctx.transport orelse t.transport(), arena, api_key, mime, bytes);
+        return send.withTransport(&self.ctx, @TypeOf(self).transcribeWith, self, .{ arena, api_key, mime, bytes });
     }
 
     /// `transcribe` over an injected transport (the seam tests mock).
@@ -213,8 +212,7 @@ pub const Transcription = struct {
         api_key: []const u8,
         audio_url: []const u8,
     ) ![]const u8 {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.submitWith(self.ctx.transport orelse t.transport(), arena, api_key, audio_url);
+        return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, audio_url });
     }
 
     /// `submit` over an injected transport (the seam tests mock).
