@@ -269,20 +269,19 @@ fn batchRequestIndex(id: ?json.Value) ?usize {
     return std.fmt.parseInt(usize, digits, 10) catch null;
 }
 
-/// A handle to a submitted batch — the Job engine's batch adapter target. Carries
-/// the injected transport so the poll/result hops are mockable. `base_url` backs
-/// the poll/result URLs (defaults to the provider's base; a client override or a
-/// mock URL replaces it).
+/// A handle to a submitted batch — the Job engine's batch adapter target. It
+/// carries the client's `http.Ctx` by value, as the other SDKs' handles carry
+/// their client config, and resolves the transport on each poll through
+/// `send.withTransport` (BUG-080). It never stores an `http.Transport`: that is
+/// a borrowed pointer, and the one `Text.batch` built died with its frame.
+/// `ctx.base_url` backs the poll/result URLs (else the provider's base),
+/// `ctx.io` supplies the sleep in `wait`, and `ctx.transport` is the test seam.
+/// A caller resuming a batch by id (ADR-014) passes its client's `ctx`.
 pub const BatchHandle = struct {
     id: []const u8,
     provider: providers.ProviderName,
-    transport: http.Transport,
+    ctx: http.Ctx,
     api_key: []const u8 = "",
-    base_url: ?[]const u8 = null,
-    /// Supplies the inter-poll sleep in `wait`. Defaulted so a caller
-    /// reconstructing a handle for cross-process resume (ADR-014) need only
-    /// supply it when it intends to block.
-    io: ?std.Io = null,
 
     /// One poll round-trip (ADR-063 Poll): status -> classify -> (fetch results
     /// on success). Returns the normalized JobStatus.
@@ -304,7 +303,7 @@ pub const BatchHandle = struct {
     /// assigned (a batch created elsewhere, resumed by id) follow the indexed
     /// ones in source order.
     pub fn wait(self: BatchHandle, arena: std.mem.Allocator) !job.JobStatus([]Response) {
-        return job.wait(BatchAdapter, .{ .handle = self }, self.io orelse return error.NoIo, arena);
+        return job.wait(BatchAdapter, .{ .handle = self }, self.ctx.io, arena);
     }
 };
 
@@ -345,10 +344,8 @@ pub fn submitWith(
     return .{
         .id = try arena.dupe(u8, id.string),
         .provider = provider,
-        .transport = transport,
+        .ctx = ctx.*,
         .api_key = api_key,
-        .base_url = ctx.base_url,
-        .io = ctx.io,
     };
 }
 
@@ -364,7 +361,7 @@ const BatchAdapter = struct {
     }
 
     fn base(self: BatchAdapter) []const u8 {
-        return self.handle.base_url orelse providers.spec(self.handle.provider).base_url;
+        return self.handle.ctx.base_url orelse providers.spec(self.handle.provider).base_url;
     }
 
     pub fn config(self: BatchAdapter, arena: std.mem.Allocator) !job.LifecycleConfig {
@@ -413,8 +410,12 @@ const BatchAdapter = struct {
     }
 
     fn get(self: BatchAdapter, arena: std.mem.Allocator, url: []const u8) !http.Response {
+        return send.withTransport(&self.handle.ctx, getWith, self, .{ arena, url });
+    }
+
+    fn getWith(self: BatchAdapter, transport: http.Transport, arena: std.mem.Allocator, url: []const u8) !http.Response {
         const headers = try http.buildAuthHeaders(arena, self.handle.provider, self.handle.api_key);
-        return self.handle.transport.send(arena, .{ .method = .GET, .url = url, .headers = headers });
+        return transport.send(arena, .{ .method = .GET, .url = url, .headers = headers });
     }
 };
 
@@ -423,6 +424,12 @@ fn replaceId(arena: std.mem.Allocator, template: []const u8, id: []const u8) ![]
     const idx = std.mem.indexOf(u8, template, "{id}") orelse return template;
     return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ template[0..idx], id, template[idx + "{id}".len ..] });
 }
+
+
+
+
+
+
 
 
 

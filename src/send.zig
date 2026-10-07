@@ -21,6 +21,26 @@ const json = @import("json.zig");
 const http = @import("http.zig");
 const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
+const HttpTransport = @import("http_transport.zig").HttpTransport;
+
+fn ReturnOf(comptime func: anytype) type {
+    return @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+}
+
+/// Run `func(self, transport, args...)` with the transport this call should
+/// use: the context's override when set, else a production `HttpTransport`
+/// built from the context (BUG-080).
+///
+/// `http.Transport` borrows the value it points at, so the `HttpTransport`
+/// lives in THIS frame and dies when the call returns. That is why it is built
+/// here and nowhere else: a terminal cannot keep it, and a value that outlives
+/// the call (a `BatchHandle`) stores the `http.Ctx` and comes back here on each
+/// use. A source test in this file fails if `HttpTransport.transport()` is
+/// called anywhere else outside the test mocks.
+pub fn withTransport(ctx: *const http.Ctx, comptime func: anytype, self: anytype, args: anytype) ReturnOf(func) {
+    var t = HttpTransport.fromCtx(ctx);
+    return @call(.auto, func, .{ self, ctx.transport orelse t.transport() } ++ args);
+}
 
 /// A non-2xx reply, or a body that is not the media type the caller expected.
 /// `Timeout` is the client's idle timeout expiring (BUG-062); every other
@@ -184,6 +204,48 @@ const testing = std.testing;
 fn testCtx(gpa: std.mem.Allocator) http.Ctx {
     return .{ .gpa = gpa, .io = testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

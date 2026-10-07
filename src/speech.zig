@@ -104,8 +104,7 @@ pub const Speech = struct {
         api_key: []const u8,
         text: []const u8,
     ) !SpeechResponse {
-        var t = http.HttpTransport.fromCtx(&self.ctx);
-        return self.generateWith(self.ctx.transport orelse t.transport(), arena, api_key, text);
+        return send.withTransport(&self.ctx, @TypeOf(self).generateWith, self, .{ arena, api_key, text });
     }
 
     /// `generate` over an injected transport (the seam tests mock).
