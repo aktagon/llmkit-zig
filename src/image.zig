@@ -322,16 +322,16 @@ pub fn parseImageResponse(arena: std.mem.Allocator, provider: ProviderName, raw:
         return error.UnsupportedImageProvider;
 
     if (std.mem.eql(u8, cfg.response_shape, "DataArrayB64Json"))
-        return parseDataArrayB64Json(arena, raw, cfg.usage_input_path, cfg.usage_output_path);
+        return parseDataArrayB64Json(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
     if (std.mem.eql(u8, cfg.response_shape, "VertexPredictions"))
         return parseVertexPredictions(arena, raw);
-    return parseGoogleParts(arena, raw, cfg.usage_input_path, cfg.usage_output_path);
+    return parseGoogleParts(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
 }
 
 /// Decode the `data[].b64_json` shape (OpenAI / xAI / Recraft). SVG bytes
 /// (Recraft vector models) are sniffed to image/svg+xml; raster bytes never
 /// start with '<', so the sniff is a no-op for them. Usage from the dotted paths.
-fn parseDataArrayB64Json(arena: std.mem.Allocator, raw: json.Value, input_path: []const u8, output_path: []const u8) ParseError!ImageResponse {
+fn parseDataArrayB64Json(arena: std.mem.Allocator, raw: json.Value, input_path: []const u8, output_path: []const u8, reasoning_path: []const u8) ParseError!ImageResponse {
     var images: std.ArrayList(ImageData) = .empty;
     var revised: std.ArrayList([]const u8) = .empty;
     if (json.getPath(raw, "data")) |data| {
@@ -356,7 +356,7 @@ fn parseDataArrayB64Json(arena: std.mem.Allocator, raw: json.Value, input_path: 
     return .{
         .images = try images.toOwnedSlice(arena),
         .text = try std.mem.join(arena, "\n", revised.items),
-        .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path) },
+        .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path), .reasoning = response.optInt(raw, reasoning_path) },
     };
 }
 
@@ -391,7 +391,7 @@ fn parseVertexPredictions(arena: std.mem.Allocator, raw: json.Value) ParseError!
 
 /// Decode the Google `candidates[0].content.parts[].inlineData` shape. Usage
 /// from the dotted paths. Mirrors Rust `extract_google_image_parts`.
-fn parseGoogleParts(arena: std.mem.Allocator, raw: json.Value, input_path: []const u8, output_path: []const u8) ParseError!ImageResponse {
+fn parseGoogleParts(arena: std.mem.Allocator, raw: json.Value, input_path: []const u8, output_path: []const u8, reasoning_path: []const u8) ParseError!ImageResponse {
     var images: std.ArrayList(ImageData) = .empty;
     var text: std.ArrayList([]const u8) = .empty;
     var finish_reason: []const u8 = "";
@@ -421,7 +421,7 @@ fn parseGoogleParts(arena: std.mem.Allocator, raw: json.Value, input_path: []con
     return .{
         .images = try images.toOwnedSlice(arena),
         .text = try std.mem.join(arena, "", text.items),
-        .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path) },
+        .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path), .reasoning = response.optInt(raw, reasoning_path) },
         .finish_reason = optString(finish_reason),
         .finish_message = optString(finish_message),
     };

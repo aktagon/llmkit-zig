@@ -136,7 +136,7 @@ fn stringAt(raw: json.Value, path: []const u8) []const u8 {
 
 /// Read an integer at a dotted path, or null when the provider declares no path
 /// for this field or the response did not carry it (ADR-081).
-fn optInt(raw: json.Value, path: []const u8) ?i64 {
+pub fn optInt(raw: json.Value, path: []const u8) ?i64 {
     if (path.len == 0) return null;
     const v = json.getPath(raw, path) orelse return null;
     return switch (v) {
