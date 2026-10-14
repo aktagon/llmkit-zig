@@ -89,6 +89,8 @@ pub const Image = struct {
     count_: ?i64 = null,
     parts_: [max_image_parts]ImageInput = undefined,
     part_count_: usize = 0,
+    /// Set when `image` is called with `parts_` full; the terminal rejects it.
+    parts_overflow_: bool = false,
 
     /// The image model id (ADR-021 bare-noun replacer). Carried in the body for
     /// the OpenAI/Recraft flat shapes; omitted for Google (model is in the URL).
@@ -151,9 +153,14 @@ pub const Image = struct {
     /// `mime` is the IANA media type; `bytes` is RAW (the builder base64-encodes
     /// it). Parts precede the prompt text in caller order (ADR-021 `Add*`-class
     /// appender; kept as `image` for call-site uniformity with `Text.image`).
+    /// A part past `max_image_parts` is not stored; `generate` then returns
+    /// `error.TooManyImageParts`.
     pub fn image(self: Image, mime: []const u8, bytes: []const u8) Image {
         var s = self;
-        std.debug.assert(s.part_count_ < max_image_parts);
+        if (s.part_count_ == max_image_parts) {
+            s.parts_overflow_ = true;
+            return s;
+        }
         s.parts_[s.part_count_] = .{ .mime = mime, .bytes = bytes };
         s.part_count_ += 1;
         return s;
@@ -232,10 +239,12 @@ pub const Image = struct {
 
     /// BUG-096: both limits are llmkit wire facts per model. A model that takes
     /// no image input rejects any image part; `max_input_images` 0 means no
-    /// llmkit limit, and the provider decides volume.
+    /// llmkit limit, and the provider decides volume. Zig alone also rejects
+    /// parts past the builder's fixed `max_image_parts` capacity.
     fn checkImageParts(self: Image, m: image_gen.ImageModelDef) ValidationError!void {
         if (self.part_count_ > 0 and !m.supports_image_input)
             return error.ImageInputUnsupported;
+        if (self.parts_overflow_) return error.TooManyImageParts;
         if (m.max_input_images > 0 and self.part_count_ > @as(usize, @intCast(m.max_input_images)))
             return error.TooManyImageParts;
     }
@@ -503,6 +512,25 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
