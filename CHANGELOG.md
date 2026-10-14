@@ -5,9 +5,15 @@ All notable changes to the llmkit Zig SDK are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-10-14
+
+First release.
 
 ### Changed
+
+- **BREAKING — `Response.content` is now `Response.text`.** Every response type
+  is now the same public struct the other SDKs return, with the same field
+  names. A batch handle keeps its id at `handle.value.id`.
 
 - **BREAKING — image input limits are per model, and the provider-level count is gone.**
   `ImageGenDef.max_input_count` is removed. It mixed two kinds of number: wire limits, and
@@ -37,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Conversation history.** `Text.history(messages)` sends earlier turns before
+  the prompt. An assistant `Message` that carries the `provider_turn` from an
+  earlier response is sent back exactly as the provider returned it, so
+  reasoning and provider metadata survive the round-trip.
+- **The agent runs tools.** `Agent.chat` sends the prompt, runs each tool the
+  model calls, returns the results, and repeats until the model answers.
+  `maxToolIterations` caps the rounds (default 10), `Agent.history` seeds the
+  conversation, usage sums every round, and each tool call fires `tool_call`
+  middleware events that can veto it.
+- `Text.text(s)` adds a text part to the user turn.
 - `batch_slot_missing` and `batch_slot_error`: the finish reasons of a batch
   slot with no result, and of a failed slot the provider gave no reason for.
   Compare against them instead of typing the strings.
@@ -66,6 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The package can be imported.** `b.dependency("llmkit", ...).module("llmkit")`
+  found no module, because the build registered none by name.
+- Google requests put the model in the URL. They were sent to a path with a
+  literal `{model}` in it.
+- `protocol(.responses)` sends to `/v1/responses`. It sent the Responses body to
+  `/v1/chat/completions`.
+- A builder without `model(...)` sends the provider's default model. It sent no
+  model.
+- Google streams use the streaming endpoint.
+- Music generation sends lyrics before the prompt, as the providers expect.
+- `BatchHandle.wait` compiles. It failed to compile on first use.
 - **OpenAI batch failures show the provider's error.** Waiting on an OpenAI
   batch now also reads its error file. A failed request's finish reason is the
   provider's error code (for example `batch_expired`), and its finish message
@@ -90,32 +117,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stream path assembled its URL directly instead of splicing the `?key=`
   the provider's auth scheme requires. All send paths now share one URL
   assembly.
-- Requests carrying a JSON body now send `Content-Type: application/json`. The
-  SigV4 signer already signed a content-type when present, so a signed-but-unsent
-  header would have failed Bedrock signature validation.
+- Requests carrying a JSON body now send `Content-Type: application/json`.
 - The client base-URL override now applies to every send path, not only the
   catalogue request assembly.
 
 ### Known limitations
 
-Two capabilities are deliberately incomplete at this release rather than
-implemented ahead of a cross-SDK decision. Both are recorded here because a
-capability must not be advertised before it holds.
+These are not supported yet:
+
+- **AWS Bedrock cannot send.** Requests are not signed, so Bedrock rejects
+  them.
+- **Raw responses.** The `raw` field on responses is always null; there is no
+  way to request it.
+- **Telemetry export.** The client does not send OpenTelemetry spans.
 
 - **Video generation is submit-only.** `video().submit` returns the provider's
   job id, but there is no poll/wait runtime, so a caller must poll the provider
-  themselves. The other SDKs each carry a hand-written video poll loop that
-  ADR-062 slice 2 is scheduled to replace with the shared job engine across
-  every SDK at once; writing a seventh hand-written copy now would be work that
-  migration deletes. Zig's video poll lands with that migration.
+  themselves.
 - **Streaming covers OpenAI-shape providers and Google, not Anthropic.**
-  Anthropic's stream is event-typed rather than data-only, and no SDK has a
-  cross-SDK golden for that shape yet (ADR-065 phase B3). Non-streaming
+  Anthropic's stream is event-typed rather than data-only. Non-streaming
   Anthropic requests are unaffected, as is streaming for the other providers.
   Attempting to stream an event-typed provider returns
   `error.UnsupportedWireShape` rather than silently returning empty text.
 
 Also not yet implemented: Google's `ResourceCaching` pre-hop (explicit
 `cache_control` caching works), the live `/models` catalogue send (the
-compiled-in catalogue and request assembly work), and the agent's multi-turn
-tool auto-execution loop (single-round tool-calling works).
+compiled-in catalogue and request assembly work), and polling asynchronous
+transcription jobs.

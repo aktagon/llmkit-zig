@@ -1,6 +1,6 @@
 .{
     .name = .llmkit,
-    .version = "0.0.0",
+    .version = "1.0.0",
     // The 0.16.0 pin is load-bearing: Zig is pre-1.0 and churns hard across
     // minors (ADR-069 ZIG-003). It matches the dev-zig skill's verified surface.
     .minimum_zig_version = "0.16.0",
