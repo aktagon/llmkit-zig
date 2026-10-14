@@ -2,6 +2,7 @@
 
 
 const ProviderName = @import("providers.zig").ProviderName;
+const RequestVariant = @import("image_gen.zig").RequestVariant;
 
 pub const VideoModelDef = struct {
     model_id: []const u8,
@@ -20,7 +21,9 @@ pub const VideoGenDef = struct {
     output_delivery: []const u8,
     /// Video API base when it differs from the chat base; "" = use chat base.
     video_base_url: []const u8,
-    gen_endpoint: []const u8,
+    /// Submit requests per carried input, TextOnly first; each endpoint is
+    /// relative to the resolved video base (ADR-096).
+    variants: []const RequestVariant,
     /// Poll template with an {id} placeholder.
     poll_endpoint: []const u8,
     /// File-retrieve template with {file_id} for two-hop providers; "" = single-hop.
@@ -36,7 +39,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoBedrock",
             .output_delivery = "DeliveryOutputURI",
             .video_base_url = "",
-            .gen_endpoint = "/async-invoke",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/async-invoke" },
+            },
             .poll_endpoint = "/async-invoke/{id}",
             .file_endpoint = "",
             .submit_handle_field = "invocationArn",
@@ -57,7 +62,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoVeo",
             .output_delivery = "DeliveryDownload",
             .video_base_url = "",
-            .gen_endpoint = "/v1beta/models/{model}:predictLongRunning",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/v1beta/models/{model}:predictLongRunning" },
+            },
             .poll_endpoint = "/v1beta/{id}",
             .file_endpoint = "",
             .submit_handle_field = "name",
@@ -78,7 +85,10 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoGrok",
             .output_delivery = "DeliveryURL",
             .video_base_url = "",
-            .gen_endpoint = "/v1/videos/generations",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/v1/videos/generations" },
+                .{ .carries = "WithReferenceImages", .shape = "", .endpoint = "/v1/videos/generations" },
+            },
             .poll_endpoint = "/v1/videos/{id}",
             .file_endpoint = "",
             .submit_handle_field = "request_id",
@@ -99,7 +109,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoMinimax",
             .output_delivery = "DeliveryURL",
             .video_base_url = "https://api.minimax.io",
-            .gen_endpoint = "/v1/video_generation",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/v1/video_generation" },
+            },
             .poll_endpoint = "/v1/query/video_generation?task_id={id}",
             .file_endpoint = "/v1/files/retrieve?file_id={file_id}",
             .submit_handle_field = "task_id",
@@ -120,7 +132,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoPixVerse",
             .output_delivery = "DeliveryURL",
             .video_base_url = "",
-            .gen_endpoint = "/openapi/v2/video/text/generate",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/openapi/v2/video/text/generate" },
+            },
             .poll_endpoint = "/openapi/v2/video/result/{id}",
             .file_endpoint = "",
             .submit_handle_field = "Resp.video_id",
@@ -159,7 +173,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoQwen",
             .output_delivery = "DeliveryURL",
             .video_base_url = "https://dashscope-intl.aliyuncs.com",
-            .gen_endpoint = "/api/v1/services/aigc/video-generation/video-synthesis",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/api/v1/services/aigc/video-generation/video-synthesis" },
+            },
             .poll_endpoint = "/api/v1/tasks/{id}",
             .file_endpoint = "",
             .submit_handle_field = "output.task_id",
@@ -180,7 +196,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoTogether",
             .output_delivery = "DeliveryURL",
             .video_base_url = "",
-            .gen_endpoint = "/v2/videos",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/v2/videos" },
+            },
             .poll_endpoint = "/v2/videos/{id}",
             .file_endpoint = "",
             .submit_handle_field = "id",
@@ -201,7 +219,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoVertexVeo",
             .output_delivery = "DeliveryDownload",
             .video_base_url = "",
-            .gen_endpoint = "/{model}:predictLongRunning",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/{model}:predictLongRunning" },
+            },
             .poll_endpoint = "/{model}:fetchPredictOperation",
             .file_endpoint = "",
             .submit_handle_field = "name",
@@ -222,7 +242,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoVidu",
             .output_delivery = "DeliveryURL",
             .video_base_url = "",
-            .gen_endpoint = "/ent/v2/text2video",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/ent/v2/text2video" },
+            },
             .poll_endpoint = "/ent/v2/tasks/{id}/creations",
             .file_endpoint = "",
             .submit_handle_field = "task_id",
@@ -261,7 +283,9 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .wire_shape = "VideoZhipu",
             .output_delivery = "DeliveryURL",
             .video_base_url = "",
-            .gen_endpoint = "/v4/videos/generations",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "", .endpoint = "/v4/videos/generations" },
+            },
             .poll_endpoint = "/v4/async-result/{id}",
             .file_endpoint = "",
             .submit_handle_field = "id",

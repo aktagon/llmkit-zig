@@ -3,6 +3,28 @@
 
 const ProviderName = @import("providers.zig").ProviderName;
 
+/// Carried input: a request variant that carries text only (ADR-096).
+pub const text_only = "TextOnly";
+/// Carried input: a request variant that carries reference images (ADR-096).
+pub const with_reference_images = "WithReferenceImages";
+
+// Image request shapes: each names one request body (ADR-096).
+pub const inline_parts = "InlineParts";
+pub const json_generations_openai = "JSONGenerationsOpenAI";
+pub const multipart_form = "MultipartForm";
+pub const json_inline_refs = "JSONInlineRefs";
+pub const json_predict = "JSONPredict";
+pub const json_generations = "JSONGenerations";
+
+/// One wire request of an image or video config, keyed by the inputs it
+/// carries (ADR-096). `shape` is empty on a video variant; an empty
+/// `endpoint` means the provider's main endpoint template.
+pub const RequestVariant = struct {
+    carries: []const u8,
+    shape: []const u8,
+    endpoint: []const u8,
+};
+
 pub const ImageModelDef = struct {
     model_id: []const u8,
     label: []const u8,
@@ -17,29 +39,29 @@ pub const ImageModelDef = struct {
 };
 
 pub const ImageGenDef = struct {
-    input_mode: []const u8,
     output_mode: []const u8,
     /// Response wire family selecting the response parser (BUG-024).
     response_shape: []const u8,
     usage_input_path: []const u8,
     usage_output_path: []const u8,
     usage_reasoning_path: []const u8,
-    gen_endpoint: []const u8,
-    edit_endpoint: []const u8,
+    /// One request per carried input, TextOnly first (ADR-096).
+    variants: []const RequestVariant,
     models: []const ImageModelDef,
 };
 
 pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
     return switch (provider) {
         .google => .{
-            .input_mode = "InlineParts",
             .output_mode = "Base64Inline",
             .response_shape = "GoogleParts",
             .usage_input_path = "usageMetadata.promptTokenCount",
             .usage_output_path = "usageMetadata.candidatesTokenCount",
             .usage_reasoning_path = "usageMetadata.thoughtsTokenCount",
-            .gen_endpoint = "",
-            .edit_endpoint = "",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "InlineParts", .endpoint = "" },
+                .{ .carries = "WithReferenceImages", .shape = "InlineParts", .endpoint = "" },
+            },
             .models = &.{
                 .{
                     .model_id = "gemini-3-pro-image-preview",
@@ -60,14 +82,15 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             },
         },
         .grok => .{
-            .input_mode = "JSONInlineRefs",
             .output_mode = "Base64Inline",
             .response_shape = "DataArrayB64Json",
             .usage_input_path = "",
             .usage_output_path = "",
             .usage_reasoning_path = "",
-            .gen_endpoint = "/v1/images/generations",
-            .edit_endpoint = "/v1/images/edits",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "JSONInlineRefs", .endpoint = "/v1/images/generations" },
+                .{ .carries = "WithReferenceImages", .shape = "JSONInlineRefs", .endpoint = "/v1/images/edits" },
+            },
             .models = &.{
                 .{
                     .model_id = "grok-imagine-image-quality",
@@ -80,14 +103,15 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             },
         },
         .openai => .{
-            .input_mode = "MultipartForm",
             .output_mode = "Base64Inline",
             .response_shape = "DataArrayB64Json",
             .usage_input_path = "usage.input_tokens",
             .usage_output_path = "usage.output_tokens",
             .usage_reasoning_path = "",
-            .gen_endpoint = "/v1/images/generations",
-            .edit_endpoint = "/v1/images/edits",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "JSONGenerationsOpenAI", .endpoint = "/v1/images/generations" },
+                .{ .carries = "WithReferenceImages", .shape = "MultipartForm", .endpoint = "/v1/images/edits" },
+            },
             .models = &.{
                 .{
                     .model_id = "gpt-image-1",
@@ -124,14 +148,14 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             },
         },
         .openrouter => .{
-            .input_mode = "JSONGenerations",
             .output_mode = "Base64Inline",
             .response_shape = "DataArrayB64Json",
             .usage_input_path = "usage.prompt_tokens",
             .usage_output_path = "usage.completion_tokens",
             .usage_reasoning_path = "",
-            .gen_endpoint = "/v1/images",
-            .edit_endpoint = "",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "JSONGenerations", .endpoint = "/v1/images" },
+            },
             .models = &.{
                 .{
                     .model_id = "google/gemini-2.5-flash-image",
@@ -192,14 +216,14 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             },
         },
         .recraft => .{
-            .input_mode = "JSONGenerations",
             .output_mode = "Base64Inline",
             .response_shape = "DataArrayB64Json",
             .usage_input_path = "",
             .usage_output_path = "",
             .usage_reasoning_path = "",
-            .gen_endpoint = "/v1/images/generations",
-            .edit_endpoint = "",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "JSONGenerations", .endpoint = "/v1/images/generations" },
+            },
             .models = &.{
                 .{
                     .model_id = "recraftv3",
@@ -220,38 +244,38 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             },
         },
         .vertex => .{
-            .input_mode = "JSONPredict",
             .output_mode = "Base64Inline",
             .response_shape = "VertexPredictions",
             .usage_input_path = "",
             .usage_output_path = "",
             .usage_reasoning_path = "",
-            .gen_endpoint = "",
-            .edit_endpoint = "",
+            .variants = &.{
+                .{ .carries = "TextOnly", .shape = "JSONPredict", .endpoint = "" },
+            },
             .models = &.{
                 .{
                     .model_id = "imagen-3.0-fast-generate-001",
                     .label = "Imagen 3 Fast",
                     .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
-                    .max_input_images = 1,
-                    .supports_image_input = true,
+                    .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "imagen-3.0-generate-002",
                     .label = "Imagen 3",
                     .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
-                    .max_input_images = 1,
-                    .supports_image_input = true,
+                    .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "imagen-4.0-generate-preview-06-06",
                     .label = "Imagen 4 Preview",
                     .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
-                    .max_input_images = 1,
-                    .supports_image_input = true,
+                    .max_input_images = 0,
+                    .supports_image_input = false,
                 },
             },
         },
