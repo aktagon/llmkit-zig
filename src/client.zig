@@ -3,9 +3,7 @@
 //! Builders are immutable value types: each chain method returns a fresh copy
 //! (`var s = self; …; return s;`), so a forked chain never mutates its parent.
 //! Chain methods take neither `io` nor an allocator; only the terminals do the
-//! I/O and thus take `io` + a `gpa`. Phase 0 stops at `buildBody` — the
-//! HTTP-sending terminal (`prompt`) arrives with the HTTP module in a later
-//! phase; the wire suite asserts the body `buildBody` produces.
+//! I/O, through the `io` and `gpa` the client was built with.
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -397,7 +395,7 @@ pub const Text = struct {
     }
 
     /// Build the request body for this configuration. Returns a Value backed by
-    /// `arena`. Phase 0/1 do no HTTP send.
+    /// `arena`. Sends nothing; `prompt` sends this body.
     pub fn buildBody(self: Text, arena: std.mem.Allocator, text_prompt: []const u8) request.BuildError!json.Value {
         return request.buildChatBody(arena, self.chatConfig(text_prompt));
     }
@@ -577,6 +575,33 @@ const TestHook = struct {
         return .{ .ptr = self, .call_fn = call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

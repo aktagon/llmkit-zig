@@ -554,3 +554,13 @@ fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.
 
     try json.mergeRoot(arena, root, root_extras);
 }
+
+
+
+
+
+
+
+
+
+

@@ -177,3 +177,62 @@ fn mimeSubtype(mime: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, mime, '/')) |i| return mime[i + 1 ..];
     return mime;
 }
+
+// "PNG" base64-encodes to "UE5H"; "JPG" to "SlBH".
+const test_media = [_]MediaPart{
+    .{ .file = "file-abc123" },
+    .{ .image = .{ .mime = "image/png", .bytes = "PNG" } },
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
