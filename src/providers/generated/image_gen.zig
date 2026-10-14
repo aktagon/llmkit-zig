@@ -11,6 +11,9 @@ pub const ImageModelDef = struct {
     /// Images llmkit serializes when the wire shape fixes the count
     /// (e.g. Grok's single-seed slot); 0 = no llmkit limit (BUG-011).
     max_input_images: i64,
+    /// Whether llmkit sends Image Parts for this model; false means the
+    /// runtime rejects them (BUG-096).
+    supports_image_input: bool,
 };
 
 pub const ImageGenDef = struct {
@@ -21,7 +24,6 @@ pub const ImageGenDef = struct {
     usage_input_path: []const u8,
     usage_output_path: []const u8,
     usage_reasoning_path: []const u8,
-    max_input_count: i64,
     gen_endpoint: []const u8,
     edit_endpoint: []const u8,
     models: []const ImageModelDef,
@@ -36,7 +38,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_input_path = "usageMetadata.promptTokenCount",
             .usage_output_path = "usageMetadata.candidatesTokenCount",
             .usage_reasoning_path = "usageMetadata.thoughtsTokenCount",
-            .max_input_count = 14,
             .gen_endpoint = "",
             .edit_endpoint = "",
             .models = &.{
@@ -46,6 +47,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{ "16:9", "1:1", "21:9", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16" },
                     .image_sizes = &.{ "1K", "2K", "4K" },
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "gemini-3.1-flash-image-preview",
@@ -53,6 +55,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{ "16:9", "1:1", "1:4", "1:8", "21:9", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16" },
                     .image_sizes = &.{ "1K", "2K", "4K", "512" },
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
             },
         },
@@ -63,7 +66,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_input_path = "",
             .usage_output_path = "",
             .usage_reasoning_path = "",
-            .max_input_count = 16,
             .gen_endpoint = "/v1/images/generations",
             .edit_endpoint = "/v1/images/edits",
             .models = &.{
@@ -73,6 +75,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{ "16:9", "19.5:9", "1:1", "1:2", "20:9", "2:1", "2:3", "3:2", "3:4", "4:3", "9:16", "9:19.5", "9:20", "auto" },
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
             },
         },
@@ -83,7 +86,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_input_path = "usage.input_tokens",
             .usage_output_path = "usage.output_tokens",
             .usage_reasoning_path = "",
-            .max_input_count = 16,
             .gen_endpoint = "/v1/images/generations",
             .edit_endpoint = "/v1/images/edits",
             .models = &.{
@@ -93,6 +95,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "gpt-image-1-mini",
@@ -100,6 +103,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "gpt-image-1.5",
@@ -107,6 +111,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "gpt-image-2",
@@ -114,6 +119,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = true,
                 },
             },
         },
@@ -124,7 +130,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_input_path = "usage.prompt_tokens",
             .usage_output_path = "usage.completion_tokens",
             .usage_reasoning_path = "",
-            .max_input_count = 0,
             .gen_endpoint = "/v1/images",
             .edit_endpoint = "",
             .models = &.{
@@ -134,6 +139,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "google/gemini-3-pro-image",
@@ -141,6 +147,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "google/gemini-3.1-flash-image",
@@ -148,6 +155,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "google/gemini-3.1-flash-lite-image",
@@ -155,6 +163,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "openai/gpt-5-image",
@@ -162,6 +171,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "openai/gpt-5-image-mini",
@@ -169,6 +179,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "openai/gpt-5.4-image-2",
@@ -176,6 +187,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
             },
         },
@@ -186,7 +198,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_input_path = "",
             .usage_output_path = "",
             .usage_reasoning_path = "",
-            .max_input_count = 0,
             .gen_endpoint = "/v1/images/generations",
             .edit_endpoint = "",
             .models = &.{
@@ -196,6 +207,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "recraftv3_vector",
@@ -203,6 +215,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
+                    .supports_image_input = false,
                 },
             },
         },
@@ -213,7 +226,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_input_path = "",
             .usage_output_path = "",
             .usage_reasoning_path = "",
-            .max_input_count = 1,
             .gen_endpoint = "",
             .edit_endpoint = "",
             .models = &.{
@@ -222,21 +234,24 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .label = "Imagen 3 Fast",
                     .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
-                    .max_input_images = 0,
+                    .max_input_images = 1,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "imagen-3.0-generate-002",
                     .label = "Imagen 3",
                     .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
-                    .max_input_images = 0,
+                    .max_input_images = 1,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "imagen-4.0-generate-preview-06-06",
                     .label = "Imagen 4 Preview",
                     .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
-                    .max_input_images = 0,
+                    .max_input_images = 1,
+                    .supports_image_input = true,
                 },
             },
         },
