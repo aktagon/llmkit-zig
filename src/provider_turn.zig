@@ -37,14 +37,7 @@ const providers = @import("providers/generated/providers.zig");
 /// it survives at rest byte-for-byte; `wire_shape` is the `ChatWireShape`
 /// that produced it, spelled exactly as the SDK constant, because a payload is
 /// only ever replayed under the shape that produced it (RSN-006).
-///
-/// Declared here — as `speech.zig` declares its own `AudioData` and `image.zig`
-/// its own `ImageData` — rather than consumed from the generated `structs.zig`,
-/// which is not yet wired into the module graph.
-pub const ProviderTurn = struct {
-    wire_shape: []const u8,
-    wire: []const u8,
-};
+pub const ProviderTurn = @import("providers/generated/structs.zig").ProviderTurn;
 
 /// One dot-notation path segment: a field name plus an array index, or `null`
 /// when the segment carries none.

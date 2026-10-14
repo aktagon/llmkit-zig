@@ -441,7 +441,7 @@ pub const Text = struct {
         // `.protocol(.responses)` reply is decoded with the Responses envelope
         // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
         const shape = try request.resolveWireShape(providers.spec(self.provider), cfg.protocol);
-        var resp = try response_mod.decodeResponse(arena, self.provider, shape, reply.value);
+        var resp = (try response_mod.decodeResponse(arena, self.provider, shape, reply.value)).response;
         // ADR-085: capture the assistant turn as the provider serialized it, from
         // the reply BYTES. decodeResponse only ever sees the parsed tree, which
         // has no memory of them (ADR-069 ZIG-002), so the capture happens here.

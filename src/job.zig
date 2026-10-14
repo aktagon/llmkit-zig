@@ -120,7 +120,7 @@ pub fn wait(comptime Adapter: type, adapter: Adapter, io: std.Io, arena: std.mem
         const st = try pollOnce(Adapter, adapter, arena);
         if (st.state != .running) return st;
         if (elapsed_ms >= cfg.poll_timeout_ms) return error.PollTimeout;
-        try io.sleep(.fromMilliseconds(cfg.poll_interval_ms), .awake);
+        try io.sleep(.fromMilliseconds(@intCast(cfg.poll_interval_ms)), .awake);
         elapsed_ms += cfg.poll_interval_ms;
     }
 }

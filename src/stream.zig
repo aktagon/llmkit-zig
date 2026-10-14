@@ -120,9 +120,12 @@ pub fn parseSseBuffer(
     }
 
     return .{
-        .content = try content.toOwnedSlice(arena),
+        .text = try content.toOwnedSlice(arena),
         .finish_reason = try arena.dupe(u8, finish_reason),
+        .finish_message = null,
         .usage = .{ .input = usage_input, .output = usage_output },
+        .raw = null,
+        .provider_turn = null,
     };
 }
 

@@ -152,7 +152,7 @@ pub const Agent = struct {
         // The agent exposes no protocol opt-in, so the effective shape is the
         // provider's default — the same fact `applyToolDefs` dispatches on.
         const shape = providers.spec(self.provider).chat_wire_shape;
-        var resp = try response.decodeResponse(arena, self.provider, shape, reply.value);
+        var resp = (try response.decodeResponse(arena, self.provider, shape, reply.value)).response;
         // ADR-085: capture the turn from the reply BYTES (see client.zig). The
         // single-round terminal returns it so a caller running their own loop can
         // thread it forward; the auto-execution loop that would REPLAY it lands

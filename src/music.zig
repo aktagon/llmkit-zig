@@ -33,6 +33,7 @@ const json = @import("json.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
 const response = @import("response.zig");
+const structs = @import("providers/generated/structs.zig");
 const providers = @import("providers/generated/providers.zig");
 const music_gen = @import("providers/generated/music_gen.zig");
 
@@ -43,22 +44,15 @@ pub const ProviderName = providers.ProviderName;
 const shape_predict = "MusicPredict";
 const shape_minimax = "MusicMinimax";
 
-/// One decoded audio clip: the provider's output MIME plus RAW bytes. Same
-/// shape as the speech path's `AudioData` — ADR-037 reuses the container rather
+/// One decoded audio clip: the provider's output MIME plus RAW bytes. The same
+/// type as the speech path's `AudioData` — ADR-037 reuses the container rather
 /// than inventing a music-specific one.
-pub const AudioData = struct {
-    mime_type: []const u8,
-    bytes: []const u8,
-};
+pub const AudioData = structs.AudioData;
 
 /// The normalized music reply: the generated clips, the shared token carrier
-/// (zero for music — no provider reports one), and an optional finish reason
-/// (Vertex reports `raiFilteredReason` when a clip was filtered).
-pub const MusicResponse = struct {
-    audio: []const AudioData,
-    usage: response.Usage = .{},
-    finish_reason: ?[]const u8 = null,
-};
+/// (unreported for music — no provider reports one), and an optional finish
+/// reason (Vertex reports `raiFilteredReason` when a clip was filtered).
+pub const MusicResponse = structs.MusicResponse;
 
 pub const BuildError = error{
     UnsupportedMusicProvider,
@@ -300,7 +294,7 @@ fn parsePredictResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime
         }
     };
 
-    return .{ .audio = try clips.toOwnedSlice(arena), .finish_reason = finish };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = finish, .finish_message = null, .raw = null };
 }
 
 fn parseMinimaxResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime: []const u8) !MusicResponse {
@@ -311,7 +305,7 @@ fn parseMinimaxResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime
             try clips.append(arena, .{ .mime_type = fallback_mime, .bytes = bytes });
         } else |_| {}
     }
-    return .{ .audio = try clips.toOwnedSlice(arena) };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = null, .finish_message = null, .raw = null };
 }
 
 fn parseGeminiResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime: []const u8) !MusicResponse {
@@ -336,7 +330,7 @@ fn parseGeminiResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime:
         }
     };
 
-    return .{ .audio = try clips.toOwnedSlice(arena), .finish_reason = finish };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = finish, .finish_message = null, .raw = null };
 }
 
 /// A non-empty string at a dotted path, else null (so `orelse` chains read as

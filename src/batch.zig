@@ -35,6 +35,7 @@ const send = @import("send.zig");
 const job = @import("job.zig");
 const providers = @import("providers/generated/providers.zig");
 const batch_defs = @import("providers/generated/batch.zig");
+const structs = @import("providers/generated/structs.zig");
 
 const Response = response.Response;
 
@@ -163,7 +164,7 @@ pub fn parseBatchResults(
 
     var out = try std.ArrayList(Response).initCapacity(arena, slots.items.len + unkeyed.items.len);
     for (slots.items) |slot| {
-        out.appendAssumeCapacity(if (slot) |s| s.resp else .{ .content = "", .finish_reason = batch_defs.batch_slot_missing, .usage = .{} });
+        out.appendAssumeCapacity(if (slot) |s| s.resp else .{ .text = "", .finish_reason = batch_defs.batch_slot_missing, .finish_message = null, .usage = .{}, .raw = null, .provider_turn = null });
     }
     out.appendSliceAssumeCapacity(unkeyed.items);
     return out.toOwnedSlice(arena);
@@ -181,17 +182,19 @@ fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderNa
         if (body) |b| if (b == .object) {
             // Batch is Chat-Completions-only (ADR-055 declares no batch Responses
             // protocol), so the wire shape is explicitly empty, never derived.
-            if (response.decodeResponse(arena, provider, "", b)) |resp| return .{ .resp = resp, .succeeded = true } else |_| {}
+            if (response.decodeResponse(arena, provider, "", b)) |d| return .{ .resp = d.response, .succeeded = true } else |_| {}
         };
     }
 
     const reason = try firstPath(arena, line, bd.result_reason_paths);
     const message = try firstPath(arena, line, bd.result_message_paths);
     return .{ .resp = .{
-        .content = "",
+        .text = "",
         .finish_reason = reason orelse batch_defs.batch_slot_error,
         .finish_message = message,
         .usage = .{},
+        .raw = null,
+        .provider_turn = null,
     }, .succeeded = false };
 }
 
@@ -277,9 +280,13 @@ fn batchRequestIndex(id: ?json.Value) ?usize {
 /// `ctx.base_url` backs the poll/result URLs (else the provider's base),
 /// `ctx.io` supplies the sleep in `wait`, and `ctx.transport` is the test seam.
 /// A caller resuming a batch by id (ADR-014) passes its client's `ctx`.
+///
+/// `value` is the cross-SDK `BatchHandle` value (id, provider, raw) — the part
+/// a caller persists to resume. The generated struct cannot carry methods, so
+/// this runtime handle embeds it beside the runtime-only `ctx` and `api_key`.
+/// `value.raw` is always false until the `.raw()` opt-in lands (BUG-073).
 pub const BatchHandle = struct {
-    id: []const u8,
-    provider: providers.ProviderName,
+    value: structs.BatchHandle,
     ctx: http.Ctx,
     api_key: []const u8 = "",
 
@@ -342,8 +349,7 @@ pub fn submitWith(
     if (id != .string) return error.ApiError;
 
     return .{
-        .id = try arena.dupe(u8, id.string),
-        .provider = provider,
+        .value = .{ .id = try arena.dupe(u8, id.string), .provider = provider, .raw = false },
         .ctx = ctx.*,
         .api_key = api_key,
     };
@@ -357,11 +363,11 @@ const BatchAdapter = struct {
     pub const Out = []Response;
 
     fn lifecycle(self: BatchAdapter) batch_defs.ResourceLifecycleDef {
-        return batch_defs.batchConfig(self.handle.provider).?.lifecycle.?;
+        return batch_defs.batchConfig(self.handle.value.provider).?.lifecycle.?;
     }
 
     fn base(self: BatchAdapter) []const u8 {
-        return self.handle.ctx.base_url orelse providers.spec(self.handle.provider).base_url;
+        return self.handle.ctx.base_url orelse providers.spec(self.handle.value.provider).base_url;
     }
 
     pub fn config(self: BatchAdapter, arena: std.mem.Allocator) !job.LifecycleConfig {
@@ -381,7 +387,7 @@ const BatchAdapter = struct {
     pub fn poll(self: BatchAdapter, arena: std.mem.Allocator) !job.PollBody {
         const lc = self.lifecycle();
         // Status GET: `<base><create_endpoint>/<id>` (no dedicated polling_endpoint).
-        const url = try std.fmt.allocPrint(arena, "{s}{s}/{s}", .{ self.base(), lc.create_endpoint, self.handle.id });
+        const url = try std.fmt.allocPrint(arena, "{s}{s}/{s}", .{ self.base(), lc.create_endpoint, self.handle.value.id });
         const resp = try self.get(arena, url);
         return .{ .value = try std.json.parseFromSliceLeaky(json.Value, arena, resp.body, .{}) };
     }
@@ -393,7 +399,7 @@ const BatchAdapter = struct {
         // status body names (OpenAI). A file whose id is absent is skipped.
         var sources: std.ArrayList([]const u8) = .empty;
         if (lc.result_endpoint.len > 0) {
-            const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.result_endpoint, self.handle.id) });
+            const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.result_endpoint, self.handle.value.id) });
             try sources.append(arena, (try self.get(arena, url)).body);
         }
         for ([_][]const u8{ lc.result_file_id_path, lc.error_file_id_path }) |id_path| {
@@ -404,9 +410,9 @@ const BatchAdapter = struct {
         }
         if (sources.items.len == 0) return error.NoBatchResultSource;
 
-        const bd = batch_defs.batchConfig(self.handle.provider).?;
+        const bd = batch_defs.batchConfig(self.handle.value.provider).?;
         const count = batchRequestCount(pb.value, bd.request_count_paths);
-        return parseBatchResults(arena, self.handle.provider, sources.items, count);
+        return parseBatchResults(arena, self.handle.value.provider, sources.items, count);
     }
 
     fn get(self: BatchAdapter, arena: std.mem.Allocator, url: []const u8) !http.Response {
@@ -414,7 +420,7 @@ const BatchAdapter = struct {
     }
 
     fn getWith(self: BatchAdapter, transport: http.Transport, arena: std.mem.Allocator, url: []const u8) !http.Response {
-        const headers = try http.buildAuthHeaders(arena, self.handle.provider, self.handle.api_key);
+        const headers = try http.buildAuthHeaders(arena, self.handle.value.provider, self.handle.api_key);
         return transport.send(arena, .{ .method = .GET, .url = url, .headers = headers });
     }
 };
