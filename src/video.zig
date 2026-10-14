@@ -35,6 +35,7 @@ const send = @import("send.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
+const request_variant = @import("request_variant.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -162,6 +163,9 @@ pub const Video = struct {
     ) ![]const u8 {
         const cfg = video_gen.videoGenConfig(self.provider) orelse
             return error.UnsupportedVideoProvider;
+        // ADR-096: a seed frame selects the WithReferenceImages submit request;
+        // a config with no such variant cannot send it.
+        const variant = try request_variant.select(cfg.variants, self.part_count_);
         const body = try self.buildSubmitBody(arena, prompt);
 
         // Several providers serve video off a DIFFERENT host than chat (MiniMax,
@@ -176,7 +180,7 @@ pub const Video = struct {
             .provider = self.provider,
             .ctx = &ctx,
             .api_key = api_key,
-            .endpoint = try http.substituteModel(arena, cfg.gen_endpoint, self.model_ orelse ""),
+            .endpoint = try http.substituteModel(arena, variant.endpoint, self.model_ orelse ""),
             .op = .video_generation,
             .model = self.model_ orelse "",
         }, body);
@@ -308,6 +312,24 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

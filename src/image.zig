@@ -2,12 +2,14 @@
 //! and go/image.go, minus the HTTP send.
 //!
 //! Two pure seams the wire goldens assert:
-//!   - `Image.buildImageBody` produces the JSON request body per the provider's
-//!     generated `input_mode` fact (InlineParts -> Google generateContent
-//!     `contents`/`parts`; MultipartForm without image parts -> the OpenAI flat
-//!     generations JSON body; JSONGenerations -> Recraft's flat body) — never a
-//!     provider-name switch. The image INPUT is RAW bytes; the builder
-//!     base64-encodes it. MultipartForm WITH image parts is the edit request:
+//!   - `Image.buildImageBody` produces the JSON request body per the shape of
+//!     the request variant the parts select (ADR-096): InlineParts -> Google
+//!     generateContent `contents`/`parts`; JSONGenerationsOpenAI -> the OpenAI
+//!     flat generations body; JSONInlineRefs -> the xAI Grok body with
+//!     data-URL reference images; JSONPredict -> the Vertex Imagen
+//!     instances/parameters body; JSONGenerations -> Recraft's flat body. Never
+//!     a provider-name switch. The image INPUT is RAW bytes; the builder
+//!     base64-encodes it. The MultipartForm variant is the OpenAI edit request:
 //!     `Image.buildEditMultipart` encodes it as multipart/form-data (BUG-097).
 //!   - `parseImageResponse` projects a provider REPLY to the normalized
 //!     `{images, usage, finish_reason}` dispatched on the generated
@@ -33,6 +35,7 @@ const multipart = @import("multipart.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const image_gen = @import("providers/generated/image_gen.zig");
+const request_variant = @import("request_variant.zig");
 const response = @import("response.zig");
 
 pub const ProviderName = providers.ProviderName;
@@ -64,10 +67,11 @@ pub const ImageResponse = struct {
     finish_message: ?[]const u8 = null,
 };
 
-/// `EditIsMultipart`: the request is an OpenAI-style edit (MultipartForm with
-/// image parts), whose body is multipart, not JSON; `buildEditMultipart` builds
-/// it. Returned rather than a JSON body that would drop the images (BUG-097).
-pub const BuildError = error{ UnsupportedImageProvider, EditIsMultipart } || std.mem.Allocator.Error;
+/// `EditIsMultipart`: the selected variant is the MultipartForm request, whose
+/// body is multipart, not JSON; `buildEditMultipart` builds it. Returned rather
+/// than a JSON body that would drop the images (BUG-097). `NoRequestVariant`:
+/// the config has no request for the inputs the parts carry (ADR-096).
+pub const BuildError = error{ UnsupportedImageProvider, EditIsMultipart } || request_variant.Error || std.mem.Allocator.Error;
 
 /// A real encoded multipart/form-data body plus the boundary it used, as in
 /// `transcription.Multipart`.
@@ -81,8 +85,8 @@ const edit_boundary = "----llmkitZigImageEditBoundary7MA4YWxkTrZu0gW";
 pub const ParseError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
 /// Pre-flight rejections. Zig error sets carry no payload, so each names the
 /// KIND where the other SDKs return `ValidationError{Field, Message}`
-/// (ADR-076 §3); all three correspond to field "model" or "parts".
-pub const ValidationError = error{ UnknownImageModel, ImageInputUnsupported, TooManyImageParts };
+/// (ADR-076 §3); all four correspond to field "model" or "parts".
+pub const ValidationError = error{ UnknownImageModel, ImageInputUnsupported, TooManyImageParts } || request_variant.Error;
 
 /// Fixed capacity for reference-image Parts (edit / compositional generation).
 /// Image chain methods take no allocator (ADR-069 ZIG-005), so Parts live in a
@@ -182,36 +186,48 @@ pub const Image = struct {
         return s;
     }
 
+    /// The config's request variant for the parts this builder holds (ADR-096).
+    fn variant(self: Image, cfg: image_gen.ImageGenDef) request_variant.Error!image_gen.RequestVariant {
+        return request_variant.select(cfg.variants, self.part_count_);
+    }
+
     /// Build the image-generation request body as a dynamic JSON Value backed by
-    /// `arena`, dispatched on the provider's generated `input_mode` fact. `prompt`
-    /// is the trailing text Part; any reference-image Parts precede it (edit).
+    /// `arena`, dispatched on the shape of the request variant the parts select
+    /// (ADR-096). `prompt` is the trailing text Part; any reference-image Parts
+    /// precede it.
     pub fn buildImageBody(self: Image, arena: std.mem.Allocator, prompt: []const u8) BuildError!json.Value {
         const cfg = image_gen.imageGenConfig(self.provider) orelse
             return error.UnsupportedImageProvider;
+        const shape = (try self.variant(cfg)).shape;
         const parts = self.parts_[0..self.part_count_];
+        const eq = std.mem.eql;
 
-        if (std.mem.eql(u8, cfg.input_mode, "InlineParts"))
+        if (eq(u8, shape, image_gen.inline_parts))
             return buildGoogleImageBody(arena, self, parts, prompt);
-        if (std.mem.eql(u8, cfg.input_mode, "MultipartForm")) {
-            if (parts.len > 0) return error.EditIsMultipart;
+        if (eq(u8, shape, image_gen.multipart_form))
+            return error.EditIsMultipart;
+        if (eq(u8, shape, image_gen.json_generations_openai))
             return buildOpenAIGenBody(arena, self, prompt);
-        }
-        if (std.mem.eql(u8, cfg.input_mode, "JSONGenerations"))
+        if (eq(u8, shape, image_gen.json_inline_refs))
+            return buildXAIBody(arena, self, parts, prompt);
+        if (eq(u8, shape, image_gen.json_predict))
+            return buildVertexBody(arena, self, prompt);
+        if (eq(u8, shape, image_gen.json_generations))
             return buildRecraftGenBody(arena, self, prompt);
         return error.UnsupportedImageProvider;
     }
 
-    /// Build the OpenAI edit request (MultipartForm with image parts) as a
-    /// multipart/form-data body for the config's `edit_endpoint`. Text fields
+    /// Build the OpenAI edit request (the MultipartForm variant) as a
+    /// multipart/form-data body for that variant's endpoint. Text fields
     /// come first in a fixed order (model, prompt, size, quality, output_format,
     /// background, n), then one `image[]` file part per reference image in
     /// caller order, named `image-<i><ext>`. Mirrors Go
-    /// `buildOpenAIEditMultipart`. Rejects any other input mode, and a call with
-    /// no image parts, which is a generation request.
+    /// `buildOpenAIEditMultipart`. Rejects a call whose parts select any other
+    /// request shape.
     pub fn buildEditMultipart(self: Image, arena: std.mem.Allocator, prompt: []const u8) BuildError!Multipart {
         const cfg = image_gen.imageGenConfig(self.provider) orelse
             return error.UnsupportedImageProvider;
-        if (!std.mem.eql(u8, cfg.input_mode, "MultipartForm") or self.part_count_ == 0)
+        if (!std.mem.eql(u8, (try self.variant(cfg)).shape, image_gen.multipart_form))
             return error.UnsupportedImageProvider;
 
         var w: multipart.Writer = .{ .boundary = edit_boundary };
@@ -236,10 +252,10 @@ pub const Image = struct {
     /// the reply — the send seam does URL, headers, middleware and the non-2xx
     /// check, so this terminal is only the composition.
     ///
-    /// A MultipartForm provider (OpenAI) with reference images is an EDIT: the
-    /// multipart body goes to the config's `edit_endpoint`. Every other call is
-    /// a JSON body to the generation endpoint (`gen_endpoint`, or the chat
-    /// endpoint for Google, whose reference images ride inline as `inlineData`).
+    /// The parts select the request variant (ADR-096). The MultipartForm
+    /// variant (OpenAI with reference images) posts a multipart body; every
+    /// other variant posts a JSON body. The URL is the variant's endpoint, or
+    /// the provider's main endpoint template when the variant names none.
     pub fn generate(
         self: Image,
         arena: std.mem.Allocator,
@@ -260,14 +276,16 @@ pub const Image = struct {
         const cfg = image_gen.imageGenConfig(self.provider) orelse
             return error.UnsupportedImageProvider;
         try self.checkImageParts(try self.resolveModel(cfg));
+        const v = try self.variant(cfg);
+        const endpoint = try imageEndpoint(arena, self.provider, v, self.model_ orelse "");
 
-        if (std.mem.eql(u8, cfg.input_mode, "MultipartForm") and self.part_count_ > 0) {
+        if (std.mem.eql(u8, v.shape, image_gen.multipart_form)) {
             const mp = try self.buildEditMultipart(arena, prompt);
             const reply = try send.postRaw(transport, arena, .{
                 .provider = self.provider,
                 .ctx = &self.ctx,
                 .api_key = api_key,
-                .endpoint = cfg.edit_endpoint,
+                .endpoint = endpoint,
                 .op = .image_generation,
                 .model = self.model_ orelse "",
             }, mp.body, try std.fmt.allocPrint(arena, "multipart/form-data; boundary={s}", .{mp.boundary}));
@@ -282,7 +300,7 @@ pub const Image = struct {
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
-            .endpoint = try imageEndpoint(arena, self.provider, cfg, self.model_ orelse ""),
+            .endpoint = endpoint,
             .op = .image_generation,
             .model = self.model_ orelse "",
         }, body);
@@ -322,23 +340,23 @@ fn extFromMime(mime: []const u8) []const u8 {
     return ".bin";
 }
 
-/// The image-generation endpoint, with `{model}` substituted.
+/// The selected variant's endpoint, with `{model}` substituted.
 ///
-/// The generated `gen_endpoint` is the image-specific path when the provider has
-/// one (OpenAI `/v1/images/generations`, Recraft, xAI). It is EMPTY for Google,
-/// whose image generation reuses the chat `generateContent` endpoint — so the
-/// fallback is the provider's own chat endpoint, which is where the model id
-/// lives for that shape (`/v1beta/models/{model}:generateContent`). Reading the
+/// The variant names an image-specific path when the provider has one (OpenAI
+/// `/v1/images/generations` and `/v1/images/edits`, Recraft, xAI). It is EMPTY
+/// for Google and Vertex, whose image requests use the provider's main endpoint
+/// template, which is where the model id lives for those shapes
+/// (`/v1beta/models/{model}:generateContent`, `/{model}:predict`). Reading the
 /// fallback from the provider spec keeps this config-driven: no arm of this
 /// function knows a provider by name.
 fn imageEndpoint(
     arena: std.mem.Allocator,
     provider: ProviderName,
-    cfg: image_gen.ImageGenDef,
+    v: image_gen.RequestVariant,
     model_id: []const u8,
 ) ![]const u8 {
-    const template = if (cfg.gen_endpoint.len > 0)
-        cfg.gen_endpoint
+    const template = if (v.endpoint.len > 0)
+        v.endpoint
     else
         providers.spec(provider).endpoint;
     return http.substituteModel(arena, template, model_id);
@@ -399,6 +417,59 @@ fn buildOpenAIGenBody(arena: std.mem.Allocator, img: Image, prompt: []const u8) 
     if (img.output_format_) |f| try json.set(arena, &body, "output_format", .{ .string = f });
     if (img.background_) |bg| try json.set(arena, &body, "background", .{ .string = bg });
     if (img.count_) |n| try json.set(arena, &body, "n", .{ .integer = n });
+    return body;
+}
+
+/// The xAI Grok body for `/v1/images/generations` (text only) and
+/// `/v1/images/edits` (with reference images): `{model, prompt,
+/// response_format: "b64_json", aspect_ratio?, resolution?, n?}`. Image size
+/// maps to `resolution` (xAI's name). `response_format` is forced because xAI
+/// defaults to URL delivery. One image part -> `image: {url: "data:..."}`;
+/// several -> `images: [{url: "data:..."}, ...]` in caller order; none -> no
+/// image field. Mirrors Go `buildXAIBody`.
+fn buildXAIBody(arena: std.mem.Allocator, img: Image, parts: []const ImageInput, prompt: []const u8) BuildError!json.Value {
+    var body = json.object();
+    if (img.model_) |m| try json.set(arena, &body, "model", .{ .string = m });
+    try json.set(arena, &body, "prompt", .{ .string = prompt });
+    try json.set(arena, &body, "response_format", .{ .string = "b64_json" });
+    if (img.aspect_ratio_) |r| try json.set(arena, &body, "aspect_ratio", .{ .string = r });
+    if (img.image_size_) |z| try json.set(arena, &body, "resolution", .{ .string = z });
+    if (img.count_) |n| try json.set(arena, &body, "n", .{ .integer = n });
+
+    var refs = json.array(arena);
+    for (parts) |p| {
+        const mime = if (p.mime.len == 0) "image/png" else p.mime;
+        const url = try std.fmt.allocPrint(arena, "data:{s};base64,{s}", .{ mime, try base64Encode(arena, p.bytes) });
+        var ref = json.object();
+        try json.set(arena, &ref, "url", .{ .string = url });
+        try refs.array.append(ref);
+    }
+    switch (refs.array.items.len) {
+        0 => {},
+        1 => try json.set(arena, &body, "image", refs.array.items[0]),
+        else => try json.set(arena, &body, "images", refs),
+    }
+    return body;
+}
+
+/// The Vertex Imagen `:predict` body: `{instances: [{prompt}], parameters:
+/// {sampleCount, aspectRatio?}}`. `sampleCount` defaults to 1. The Imagen
+/// generate models take text only (BUG-101): the config has no
+/// WithReferenceImages variant, so image parts never reach here. Mirrors Go
+/// `buildVertexBody`.
+fn buildVertexBody(arena: std.mem.Allocator, img: Image, prompt: []const u8) BuildError!json.Value {
+    var instance = json.object();
+    try json.set(arena, &instance, "prompt", .{ .string = prompt });
+    var instances = json.array(arena);
+    try instances.array.append(instance);
+
+    var parameters = json.object();
+    try json.set(arena, &parameters, "sampleCount", .{ .integer = img.count_ orelse 1 });
+    if (img.aspect_ratio_) |r| try json.set(arena, &parameters, "aspectRatio", .{ .string = r });
+
+    var body = json.object();
+    try json.set(arena, &body, "instances", instances);
+    try json.set(arena, &body, "parameters", parameters);
     return body;
 }
 
@@ -584,6 +655,74 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
