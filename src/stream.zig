@@ -164,6 +164,14 @@ pub fn streamWith(
     on_chunk: ?ChunkCallback,
 ) !response.Response {
     const body = try buildStreamBody(arena, cfg);
+    const model = try request.effectiveModel(providers.spec(cfg.provider), cfg.model);
+    // A provider that streams from its own endpoint declares it (Google
+    // `:streamGenerateContent?alt=sse`); the rest stream from the chat endpoint.
+    const stream_endpoint = if (stream_defs.streamConfig(cfg.provider)) |sd| sd.endpoint else "";
+    const endpoint = if (stream_endpoint.len > 0)
+        try http.substituteModel(arena, stream_endpoint, model)
+    else
+        try request.chatEndpoint(arena, cfg);
     const raw = try send.postRaw(
         transport,
         arena,
@@ -171,10 +179,10 @@ pub fn streamWith(
             .provider = cfg.provider,
             .ctx = ctx,
             .api_key = api_key,
-            .endpoint = providers.spec(cfg.provider).endpoint,
+            .endpoint = endpoint,
             .extra_headers = try request.buildRequestHeaders(arena, cfg),
             .op = .llm_request,
-            .model = cfg.model orelse "",
+            .model = model,
         },
         try json.stringify(arena, body),
         "application/json",
