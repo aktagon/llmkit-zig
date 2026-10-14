@@ -12,6 +12,8 @@ pub const MusicModelDef = struct {
     /// ADR-037 advisory facts (queryable, never gated); 0 when unverified.
     sample_rate_hz: i64,
     available_output_formats: []const []const u8,
+    /// Whether llmkit sends Image Parts for this model.
+    supports_image_input: bool,
 };
 
 pub const MusicGenDef = struct {
@@ -36,6 +38,7 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
                     .available_output_formats = &.{ "audio/mpeg" },
+                    .supports_image_input = false,
                 },
                 .{
                     .model_id = "lyria-3-pro-preview",
@@ -45,6 +48,7 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
                     .available_output_formats = &.{ "audio/mpeg" },
+                    .supports_image_input = false,
                 },
             },
         },
@@ -61,6 +65,7 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 44100,
                     .available_output_formats = &.{ "audio/mpeg", "audio/wav" },
+                    .supports_image_input = false,
                 },
             },
         },
@@ -77,6 +82,7 @@ pub fn musicGenConfig(provider: ProviderName) ?MusicGenDef {
                     .output_mime = "audio/wav",
                     .sample_rate_hz = 48000,
                     .available_output_formats = &.{ "audio/wav" },
+                    .supports_image_input = false,
                 },
             },
         },

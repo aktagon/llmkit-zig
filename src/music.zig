@@ -19,8 +19,8 @@
 //!     `candidates[].content.parts[].inlineData.data` base64).
 //!   - `generate` (the TERMINAL) — compose the two around one send.
 //!
-//! ADR-037 hard-rejects only the unserializable: an unknown model, or an image
-//! part on a music request. Everything else is advisory.
+//! ADR-037 hard-rejects only the unserializable: an unknown model. A Zig music
+//! request has no image part to reject. Everything else is advisory.
 //!
 //! NOT YET FIXTURED. No SDK drives a music request-wire golden (HANDOFF-046
 //! slice 4 mints the first), so unlike every other Zig capability these bytes
@@ -373,6 +373,24 @@ const testing = std.testing;
 fn testMusic(gpa: std.mem.Allocator, provider: ProviderName) Music {
     return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = testing.io } };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
