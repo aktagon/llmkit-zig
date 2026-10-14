@@ -37,6 +37,7 @@ const providers = @import("providers/generated/providers.zig");
 const image_gen = @import("providers/generated/image_gen.zig");
 const request_variant = @import("request_variant.zig");
 const response = @import("response.zig");
+const structs = @import("providers/generated/structs.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -50,22 +51,13 @@ pub const ImageInput = struct {
 
 /// One decoded output image. `bytes` is RAW (already base64-decoded from the
 /// wire); `mime_type` is the provider's echoed media type (defaulting to
-/// image/png when absent). Mirrors Rust `ImageData` (ADR-018 bytes/mime accessor).
-pub const ImageData = struct {
-    mime_type: []const u8,
-    bytes: []const u8,
-};
+/// image/png when absent).
+pub const ImageData = structs.ImageData;
 
 /// The normalized image-generation reply. `images` is caller order; `text`
 /// carries any revised-prompt / text parts a provider returns; `usage` reuses
-/// the shared token carrier. Mirror of Rust `ImageResponse`.
-pub const ImageResponse = struct {
-    images: []const ImageData,
-    text: []const u8 = "",
-    usage: response.Usage = .{},
-    finish_reason: ?[]const u8 = null,
-    finish_message: ?[]const u8 = null,
-};
+/// the shared token carrier.
+pub const ImageResponse = structs.ImageResponse;
 
 /// `EditIsMultipart`: the selected variant is the MultipartForm request, whose
 /// body is multipart, not JSON; `buildEditMultipart` builds it. Returned rather
@@ -533,6 +525,9 @@ fn parseDataArrayB64Json(arena: std.mem.Allocator, raw: json.Value, input_path: 
         .images = try images.toOwnedSlice(arena),
         .text = try std.mem.join(arena, "\n", revised.items),
         .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path), .reasoning = response.optInt(raw, reasoning_path) },
+        .finish_reason = null,
+        .finish_message = null,
+        .raw = null,
     };
 }
 
@@ -561,7 +556,11 @@ fn parseVertexPredictions(arena: std.mem.Allocator, raw: json.Value) ParseError!
     }
     return .{
         .images = try images.toOwnedSlice(arena),
+        .text = "",
+        .usage = .{},
         .finish_reason = optString(finish_reason),
+        .finish_message = null,
+        .raw = null,
     };
 }
 
@@ -600,6 +599,7 @@ fn parseGoogleParts(arena: std.mem.Allocator, raw: json.Value, input_path: []con
         .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path), .reasoning = response.optInt(raw, reasoning_path) },
         .finish_reason = optString(finish_reason),
         .finish_message = optString(finish_message),
+        .raw = null,
     };
 }
 
