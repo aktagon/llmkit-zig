@@ -63,6 +63,10 @@ pub const ImageResponse = struct {
 
 pub const BuildError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
 pub const ParseError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
+/// Pre-flight rejections. Zig error sets carry no payload, so each names the
+/// KIND where the other SDKs return `ValidationError{Field, Message}`
+/// (ADR-076 §3); all three correspond to field "model" or "parts".
+pub const ValidationError = error{ UnknownImageModel, ImageInputUnsupported, TooManyImageParts };
 
 /// Fixed capacity for reference-image Parts (edit / compositional generation).
 /// Image chain methods take no allocator (ADR-069 ZIG-005), so Parts live in a
@@ -202,6 +206,7 @@ pub const Image = struct {
     ) !ImageResponse {
         const cfg = image_gen.imageGenConfig(self.provider) orelse
             return error.UnsupportedImageProvider;
+        try self.checkImageParts(try self.resolveModel(cfg));
         const body = try self.buildImageBody(arena, prompt);
 
         const raw = try send.postJson(transport, arena, .{
@@ -214,6 +219,25 @@ pub const Image = struct {
         }, body);
 
         return parseImageResponse(arena, self.provider, raw);
+    }
+
+    /// The catalogue entry for the configured model. An unknown model is
+    /// rejected, as in the other SDKs (Go `findImageModel`).
+    fn resolveModel(self: Image, cfg: image_gen.ImageGenDef) ValidationError!image_gen.ImageModelDef {
+        const want = self.model_ orelse return error.UnknownImageModel;
+        for (cfg.models) |m|
+            if (std.mem.eql(u8, m.model_id, want)) return m;
+        return error.UnknownImageModel;
+    }
+
+    /// BUG-096: both limits are llmkit wire facts per model. A model that takes
+    /// no image input rejects any image part; `max_input_images` 0 means no
+    /// llmkit limit, and the provider decides volume.
+    fn checkImageParts(self: Image, m: image_gen.ImageModelDef) ValidationError!void {
+        if (self.part_count_ > 0 and !m.supports_image_input)
+            return error.ImageInputUnsupported;
+        if (m.max_input_images > 0 and self.part_count_ > @as(usize, @intCast(m.max_input_images)))
+            return error.TooManyImageParts;
     }
 };
 
@@ -479,6 +503,93 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
