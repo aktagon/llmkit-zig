@@ -416,8 +416,8 @@ pub fn extractToolCalls(
         for (blocks.array.items) |block| {
             const tool_use = json.getPath(block, "toolUse") orelse continue;
             try out.append(arena, .{
-                .id = stringOf(json.getPath(tool_use, "toolUseId")),
-                .name = stringOf(json.getPath(tool_use, "name")),
+                .id = try stringOf(arena, json.getPath(tool_use, "toolUseId")),
+                .name = try stringOf(arena, json.getPath(tool_use, "name")),
                 .input = objectOrEmpty(json.getPath(tool_use, "input")),
             });
         }
@@ -427,14 +427,14 @@ pub fn extractToolCalls(
         for (parts.array.items) |part| {
             const function_call = json.getPath(part, "functionCall") orelse continue;
             // Google issues no call id; the name stands in for it.
-            const name = stringOf(json.getPath(function_call, "name"));
+            const name = try stringOf(arena, json.getPath(function_call, "name"));
             try out.append(arena, .{ .id = name, .name = name, .input = objectOrEmpty(json.getPath(function_call, "args")) });
         }
     } else if (argsFormatIsMap(provider)) {
         for (try json.matchingBlocks(arena, raw, "content", "type", "tool_use")) |block| {
             try out.append(arena, .{
-                .id = stringOf(json.getPath(block, "id")),
-                .name = stringOf(json.getPath(block, "name")),
+                .id = try stringOf(arena, json.getPath(block, "id")),
+                .name = try stringOf(arena, json.getPath(block, "name")),
                 .input = objectOrEmpty(json.getPath(block, "input")),
             });
         }
@@ -452,15 +452,21 @@ pub fn extractToolCalls(
                 .string => |s| objectOrEmpty(std.json.parseFromSliceLeaky(json.Value, arena, s, .{}) catch null),
                 else => objectOrEmpty(a),
             } else json.object();
-            try out.append(arena, .{ .id = stringOf(json.getPath(call, "id")), .name = name.string, .input = input });
+            try out.append(arena, .{ .id = try stringOf(arena, json.getPath(call, "id")), .name = name.string, .input = input });
         }
     }
     return out.toOwnedSlice(arena);
 }
 
-fn stringOf(v: ?json.Value) []const u8 {
+/// A field as text: a string as is, null or absent as "", anything else as
+/// its JSON text (a numeric id becomes "1"). Mirrors Rust `stringify`.
+fn stringOf(arena: std.mem.Allocator, v: ?json.Value) ![]const u8 {
     const value = v orelse return "";
-    return if (value == .string) value.string else "";
+    return switch (value) {
+        .string => |s| s,
+        .null => "",
+        else => json.stringify(arena, value),
+    };
 }
 
 fn objectOrEmpty(v: ?json.Value) json.Value {
@@ -475,6 +481,19 @@ const testing = std.testing;
 fn userMsg(text: []const u8) Message {
     return .{ .role = "user", .content = text, .tool_calls = &.{}, .tool_result = null, .provider_turn = null };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
