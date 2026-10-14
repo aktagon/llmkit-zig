@@ -2,11 +2,13 @@
 //! and go/image.go, minus the HTTP send.
 //!
 //! Two pure seams the wire goldens assert:
-//!   - `Image.buildImageBody` produces the request body per the provider's
+//!   - `Image.buildImageBody` produces the JSON request body per the provider's
 //!     generated `input_mode` fact (InlineParts -> Google generateContent
-//!     `contents`/`parts`; MultipartForm -> the OpenAI flat generations JSON
-//!     body; JSONGenerations -> Recraft's flat body) — never a provider-name
-//!     switch. The image INPUT is RAW bytes; the builder base64-encodes it.
+//!     `contents`/`parts`; MultipartForm without image parts -> the OpenAI flat
+//!     generations JSON body; JSONGenerations -> Recraft's flat body) — never a
+//!     provider-name switch. The image INPUT is RAW bytes; the builder
+//!     base64-encodes it. MultipartForm WITH image parts is the edit request:
+//!     `Image.buildEditMultipart` encodes it as multipart/form-data (BUG-097).
 //!   - `parseImageResponse` projects a provider REPLY to the normalized
 //!     `{images, usage, finish_reason}` dispatched on the generated
 //!     `response_shape` fact (GoogleParts / DataArrayB64Json / VertexPredictions,
@@ -27,6 +29,7 @@ fn optString(value: []const u8) ?[]const u8 {
 }
 const http = @import("http.zig");
 const send = @import("send.zig");
+const multipart = @import("multipart.zig");
 const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const image_gen = @import("providers/generated/image_gen.zig");
@@ -61,7 +64,20 @@ pub const ImageResponse = struct {
     finish_message: ?[]const u8 = null,
 };
 
-pub const BuildError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
+/// `EditIsMultipart`: the request is an OpenAI-style edit (MultipartForm with
+/// image parts), whose body is multipart, not JSON; `buildEditMultipart` builds
+/// it. Returned rather than a JSON body that would drop the images (BUG-097).
+pub const BuildError = error{ UnsupportedImageProvider, EditIsMultipart } || std.mem.Allocator.Error;
+
+/// A real encoded multipart/form-data body plus the boundary it used, as in
+/// `transcription.Multipart`.
+pub const Multipart = struct {
+    boundary: []const u8,
+    body: []const u8,
+};
+
+/// A fixed, deterministic multipart boundary, chosen as in `transcription.zig`.
+const edit_boundary = "----llmkitZigImageEditBoundary7MA4YWxkTrZu0gW";
 pub const ParseError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
 /// Pre-flight rejections. Zig error sets carry no payload, so each names the
 /// KIND where the other SDKs return `ValidationError{Field, Message}`
@@ -176,11 +192,43 @@ pub const Image = struct {
 
         if (std.mem.eql(u8, cfg.input_mode, "InlineParts"))
             return buildGoogleImageBody(arena, self, parts, prompt);
-        if (std.mem.eql(u8, cfg.input_mode, "MultipartForm"))
+        if (std.mem.eql(u8, cfg.input_mode, "MultipartForm")) {
+            if (parts.len > 0) return error.EditIsMultipart;
             return buildOpenAIGenBody(arena, self, prompt);
+        }
         if (std.mem.eql(u8, cfg.input_mode, "JSONGenerations"))
             return buildRecraftGenBody(arena, self, prompt);
         return error.UnsupportedImageProvider;
+    }
+
+    /// Build the OpenAI edit request (MultipartForm with image parts) as a
+    /// multipart/form-data body for the config's `edit_endpoint`. Text fields
+    /// come first in a fixed order (model, prompt, size, quality, output_format,
+    /// background, n), then one `image[]` file part per reference image in
+    /// caller order, named `image-<i><ext>`. Mirrors Go
+    /// `buildOpenAIEditMultipart`. Rejects any other input mode, and a call with
+    /// no image parts, which is a generation request.
+    pub fn buildEditMultipart(self: Image, arena: std.mem.Allocator, prompt: []const u8) BuildError!Multipart {
+        const cfg = image_gen.imageGenConfig(self.provider) orelse
+            return error.UnsupportedImageProvider;
+        if (!std.mem.eql(u8, cfg.input_mode, "MultipartForm") or self.part_count_ == 0)
+            return error.UnsupportedImageProvider;
+
+        var w: multipart.Writer = .{ .boundary = edit_boundary };
+        if (self.model_) |m| try w.field(arena, "model", m);
+        try w.field(arena, "prompt", prompt);
+        if (self.image_size_) |z| try w.field(arena, "size", z);
+        if (self.quality_) |q| try w.field(arena, "quality", q);
+        if (self.output_format_) |f| try w.field(arena, "output_format", f);
+        if (self.background_) |bg| try w.field(arena, "background", bg);
+        if (self.count_) |n| try w.field(arena, "n", try std.fmt.allocPrint(arena, "{d}", .{n}));
+
+        for (self.parts_[0..self.part_count_], 0..) |p, i| {
+            const mime = if (p.mime.len == 0) "image/png" else p.mime;
+            const filename = try std.fmt.allocPrint(arena, "image-{d}{s}", .{ i, extFromMime(mime) });
+            try w.file(arena, "image[]", filename, mime, p.bytes);
+        }
+        return .{ .boundary = edit_boundary, .body = try w.finish(arena) };
     }
 
     /// Generate images and return the decoded payload. Mirrors Go
@@ -188,12 +236,10 @@ pub const Image = struct {
     /// the reply — the send seam does URL, headers, middleware and the non-2xx
     /// check, so this terminal is only the composition.
     ///
-    /// This is the GENERATION path (`gen_endpoint`). The EDIT path — reference
-    /// images posted as `multipart/form-data` to the config's separate
-    /// `edit_endpoint` — is not wired: `buildImageBody` produces a JSON body for
-    /// every input mode, so a reference image reaches the provider inline
-    /// (Google `inlineData`) rather than as a form part, and there is no
-    /// cross-SDK fixture for the edit form.
+    /// A MultipartForm provider (OpenAI) with reference images is an EDIT: the
+    /// multipart body goes to the config's `edit_endpoint`. Every other call is
+    /// a JSON body to the generation endpoint (`gen_endpoint`, or the chat
+    /// endpoint for Google, whose reference images ride inline as `inlineData`).
     pub fn generate(
         self: Image,
         arena: std.mem.Allocator,
@@ -214,6 +260,22 @@ pub const Image = struct {
         const cfg = image_gen.imageGenConfig(self.provider) orelse
             return error.UnsupportedImageProvider;
         try self.checkImageParts(try self.resolveModel(cfg));
+
+        if (std.mem.eql(u8, cfg.input_mode, "MultipartForm") and self.part_count_ > 0) {
+            const mp = try self.buildEditMultipart(arena, prompt);
+            const reply = try send.postRaw(transport, arena, .{
+                .provider = self.provider,
+                .ctx = &self.ctx,
+                .api_key = api_key,
+                .endpoint = cfg.edit_endpoint,
+                .op = .image_generation,
+                .model = self.model_ orelse "",
+            }, mp.body, try std.fmt.allocPrint(arena, "multipart/form-data; boundary={s}", .{mp.boundary}));
+            const parsed = std.json.parseFromSliceLeaky(json.Value, arena, reply, .{}) catch
+                return error.ApiError;
+            return parseImageResponse(arena, self.provider, parsed);
+        }
+
         const body = try self.buildImageBody(arena, prompt);
 
         const raw = try send.postJson(transport, arena, .{
@@ -249,6 +311,16 @@ pub const Image = struct {
             return error.TooManyImageParts;
     }
 };
+
+/// The multipart filename extension for an image media type. Mirror of Go
+/// `extFromMime`.
+fn extFromMime(mime: []const u8) []const u8 {
+    const eq = std.mem.eql;
+    if (eq(u8, mime, "image/png")) return ".png";
+    if (eq(u8, mime, "image/jpeg") or eq(u8, mime, "image/jpg")) return ".jpg";
+    if (eq(u8, mime, "image/webp")) return ".webp";
+    return ".bin";
+}
 
 /// The image-generation endpoint, with `{model}` substituted.
 ///
@@ -512,6 +584,63 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
