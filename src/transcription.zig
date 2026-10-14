@@ -30,6 +30,7 @@
 const std = @import("std");
 const http = @import("http.zig");
 const send = @import("send.zig");
+const multipart = @import("multipart.zig");
 const json = @import("json.zig");
 const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
@@ -247,48 +248,18 @@ pub const Transcription = struct {
     }
 };
 
-/// Encode the OpenAI transcription multipart body in canonical field order.
+/// Encode the OpenAI transcription multipart body in canonical field order:
+/// model, response_format, then the file part.
 fn encodeMultipart(arena: std.mem.Allocator, model_id: []const u8, mime: []const u8, bytes: []const u8) BuildError!Multipart {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(arena);
+    var w: multipart.Writer = .{ .boundary = boundary_str };
+    try w.field(arena, "model", model_id);
+    try w.field(arena, "response_format", "verbose_json");
 
-    try appendTextField(arena, &buf, "model", model_id);
-    try appendTextField(arena, &buf, "response_format", "verbose_json");
-
-    // The file part: Content-Disposition with filename + a Content-Type line,
-    // then the raw bytes.
-    const ext = audioExtForMime(mime);
-    const filename = try std.fmt.allocPrint(arena, "audio.{s}", .{ext});
+    const filename = try std.fmt.allocPrint(arena, "audio.{s}", .{audioExtForMime(mime)});
     const content_type = if (mime.len == 0) "application/octet-stream" else mime;
+    try w.file(arena, "file", filename, content_type, bytes);
 
-    try buf.appendSlice(arena, "--");
-    try buf.appendSlice(arena, boundary_str);
-    try buf.appendSlice(arena, "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"");
-    try buf.appendSlice(arena, filename);
-    try buf.appendSlice(arena, "\"\r\nContent-Type: ");
-    try buf.appendSlice(arena, content_type);
-    try buf.appendSlice(arena, "\r\n\r\n");
-    try buf.appendSlice(arena, bytes);
-    try buf.appendSlice(arena, "\r\n");
-
-    // Closing delimiter.
-    try buf.appendSlice(arena, "--");
-    try buf.appendSlice(arena, boundary_str);
-    try buf.appendSlice(arena, "--\r\n");
-
-    return .{ .boundary = boundary_str, .body = try buf.toOwnedSlice(arena) };
-}
-
-/// Append one text form field: `--boundary\r\nContent-Disposition: form-data;
-/// name="<name>"\r\n\r\n<value>\r\n`.
-fn appendTextField(arena: std.mem.Allocator, buf: *std.ArrayList(u8), name: []const u8, value: []const u8) BuildError!void {
-    try buf.appendSlice(arena, "--");
-    try buf.appendSlice(arena, boundary_str);
-    try buf.appendSlice(arena, "\r\nContent-Disposition: form-data; name=\"");
-    try buf.appendSlice(arena, name);
-    try buf.appendSlice(arena, "\"\r\n\r\n");
-    try buf.appendSlice(arena, value);
-    try buf.appendSlice(arena, "\r\n");
+    return .{ .boundary = boundary_str, .body = try w.finish(arena) };
 }
 
 /// Map an audio IANA media type to the file extension OpenAI uses to detect the

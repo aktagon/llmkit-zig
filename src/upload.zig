@@ -15,13 +15,14 @@
 //!
 //! Filename escaping (HANDOFF-036 A2): Go, Java and Swift all splice
 //! `name="…"; filename="…"` unescaped, so a quote or CRLF in a filename corrupts
-//! the part header. This encoder escapes, matching Go's stdlib `escapeQuotes`
-//! rather than Go's own hand-rolled multipart writer.
+//! the part header. The shared `multipart.zig` encoder escapes, matching Go's
+//! stdlib `escapeQuotes` rather than Go's own hand-rolled multipart writer.
 
 const std = @import("std");
 const json = @import("json.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
+const multipart = @import("multipart.zig");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 
@@ -125,7 +126,7 @@ fn encodeMultipart(
     mime_type: []const u8,
     bytes: []const u8,
 ) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
+    var w: multipart.Writer = .{ .boundary = boundary_str };
 
     if (cfg.extra_fields_json.len > 0) {
         if (std.json.parseFromSliceLeaky(json.Value, arena, cfg.extra_fields_json, .{})) |extra| {
@@ -133,7 +134,7 @@ fn encodeMultipart(
                 var it = extra.object.iterator();
                 while (it.next()) |entry| {
                     if (entry.value_ptr.* != .string) continue;
-                    try appendTextField(arena, &buf, entry.key_ptr.*, entry.value_ptr.string);
+                    try w.field(arena, entry.key_ptr.*, entry.value_ptr.string);
                 }
             }
         } else |_| {}
@@ -141,46 +142,8 @@ fn encodeMultipart(
 
     const field = if (cfg.field_name.len > 0) cfg.field_name else "file";
     const content_type = if (mime_type.len == 0) "application/octet-stream" else mime_type;
-
-    try buf.appendSlice(arena, "--");
-    try buf.appendSlice(arena, boundary_str);
-    try buf.appendSlice(arena, "\r\nContent-Disposition: form-data; name=\"");
-    try appendEscaped(arena, &buf, field);
-    try buf.appendSlice(arena, "\"; filename=\"");
-    try appendEscaped(arena, &buf, name);
-    try buf.appendSlice(arena, "\"\r\nContent-Type: ");
-    try buf.appendSlice(arena, content_type);
-    try buf.appendSlice(arena, "\r\n\r\n");
-    try buf.appendSlice(arena, bytes);
-    try buf.appendSlice(arena, "\r\n--");
-    try buf.appendSlice(arena, boundary_str);
-    try buf.appendSlice(arena, "--\r\n");
-
-    return buf.toOwnedSlice(arena);
-}
-
-fn appendTextField(arena: std.mem.Allocator, buf: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
-    try buf.appendSlice(arena, "--");
-    try buf.appendSlice(arena, boundary_str);
-    try buf.appendSlice(arena, "\r\nContent-Disposition: form-data; name=\"");
-    try appendEscaped(arena, buf, name);
-    try buf.appendSlice(arena, "\"\r\n\r\n");
-    try buf.appendSlice(arena, value);
-    try buf.appendSlice(arena, "\r\n");
-}
-
-/// Escape a value destined for a quoted-string in a part header, matching Go's
-/// stdlib `escapeQuotes`: backslash and double-quote are backslash-escaped, and
-/// CR/LF are dropped so a crafted filename cannot inject a header line.
-fn appendEscaped(arena: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
-    for (s) |ch| switch (ch) {
-        '\\', '"' => {
-            try buf.append(arena, '\\');
-            try buf.append(arena, ch);
-        },
-        '\r', '\n' => {},
-        else => try buf.append(arena, ch),
-    };
+    try w.file(arena, field, name, content_type, bytes);
+    return w.finish(arena);
 }
 
 fn stringAt(value: json.Value, path: []const u8) ?[]const u8 {
