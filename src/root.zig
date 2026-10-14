@@ -81,6 +81,7 @@ pub const SafetySetting = client.SafetySetting;
 pub const imageGenConfig = image_gen.imageGenConfig;
 pub const ImageGenDef = image_gen.ImageGenDef;
 pub const ImageModelDef = image_gen.ImageModelDef;
+pub const RequestVariant = image_gen.RequestVariant;
 pub const musicGenConfig = music_gen.musicGenConfig;
 pub const MusicGenDef = music_gen.MusicGenDef;
 pub const MusicModelDef = music_gen.MusicModelDef;
