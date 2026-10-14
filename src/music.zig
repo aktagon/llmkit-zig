@@ -222,18 +222,20 @@ fn buildMinimaxBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []cons
     return body;
 }
 
-/// Gemini `generateContent` (Lyria 3): prompt and lyrics both serialise as
-/// `{text}` parts in caller order; `responseModalities:["AUDIO"]` asks for audio.
+/// Gemini `generateContent` (Lyria 3): lyrics and prompt both serialise as
+/// `{text}` parts, the lyrics Parts in call order and the terminal's prompt
+/// last — the order every Part-taking terminal uses, and the one the
+/// music-google golden locks. `responseModalities:["AUDIO"]` asks for audio.
 fn buildGeminiBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []const []const u8) !json.Value {
     var wire = json.array(arena);
-    if (prompt.len > 0) {
-        var p = json.object();
-        try json.set(arena, &p, "text", .{ .string = prompt });
-        try wire.array.append(p);
-    }
     for (lyrics) |l| {
         var p = json.object();
         try json.set(arena, &p, "text", .{ .string = l });
+        try wire.array.append(p);
+    }
+    if (prompt.len > 0) {
+        var p = json.object();
+        try json.set(arena, &p, "text", .{ .string = prompt });
         try wire.array.append(p);
     }
 

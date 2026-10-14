@@ -47,6 +47,15 @@ pub const Event = struct {
     phase: MiddlewarePhase,
     provider: []const u8 = "",
     model: []const u8 = "",
+    /// The tool name. Set only when op is `tool_call`. Not an OTEL attribute.
+    tool: []const u8 = "",
+    /// The tool's arguments as JSON text. Set only when op is `tool_call` and
+    /// phase is pre. Read-only: Go lets a middleware rewrite them, but a Zig
+    /// hook receives a const event. Not an OTEL attribute.
+    args: []const u8 = "",
+    /// The tool's result. Set only when op is `tool_call` and phase is post.
+    /// Not an OTEL attribute.
+    result: []const u8 = "",
     usage: ?Usage = null,
     err: ?[]const u8 = null,
     err_type: []const u8 = "",

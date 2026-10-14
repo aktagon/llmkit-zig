@@ -14,14 +14,12 @@
 //! `params_wire_field` fact (`parametersJsonSchema`); the other three carry the
 //! params under a shape-fixed key.
 //!
-//! Scope note (Phase 3): the fixture-gated surface is the tool DEFINITIONS in
-//! the outbound request. A single-round `chat` terminal (send the tool-def
-//! request, parse the reply) is provided over the injected transport; the
-//! multi-turn auto-execution tool LOOP (extract tool calls -> run -> re-send
-//! with a tool-result history) needs a multi-turn message-history body builder
-//! and is not gated by any wire fixture — deferred to a later phase alongside
-//! the remaining capabilities (HANDOFF-043). `Tool.run` is carried now so the
-//! loop can land without a Tool-shape change.
+//! The `chat` terminal runs the auto-execution tool loop: send, read the tool
+//! calls the reply asked for, run each tool, append the assistant and tool
+//! turns to the history, and re-send — until a reply calls no tool or
+//! `maxToolIterations` is reached. Each captured assistant turn is replayed
+//! verbatim on the next request (ADR-085), through the same history builder
+//! `Text.history` uses. Mirrors Rust `agent.rs` `run_tool_loop`.
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -32,11 +30,19 @@ const send = @import("send.zig");
 const provider_turn = @import("provider_turn.zig");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
+const structs = @import("providers/generated/structs.zig");
+const messages = @import("messages.zig");
+const middleware = @import("middleware.zig");
+
+pub const Message = structs.Message;
+pub const ToolCall = structs.ToolCall;
 
 /// A tool the agent can offer. `schema` is a JSON-Schema STRING inserted VERBATIM
-/// into the per-provider tool definition. `run`, when set, executes the tool
-/// for the (future) auto-execution loop; the wire-tested tool-def surface needs
-/// only name/description/schema.
+/// into the per-provider tool definition. `run` executes the tool in the
+/// auto-execution loop: it receives the call's arguments as JSON text and
+/// returns the result text, allocated in `arena`. A tool without `run`, or one
+/// whose `run` fails, answers the model with an `error: ...` result rather than
+/// failing the loop (Rust parity).
 pub const Tool = struct {
     name: []const u8,
     description: []const u8,
@@ -59,6 +65,8 @@ pub const Agent = struct {
     caching_: bool = false,
     tools_: [max_tools]Tool = undefined,
     tool_count_: usize = 0,
+    history_: []const Message = &.{},
+    max_tool_iterations_: usize = 10,
 
     pub fn model(self: Agent, m: []const u8) Agent {
         var s = self;
@@ -90,6 +98,23 @@ pub const Agent = struct {
         return s;
     }
 
+    /// Seed the conversation history (ADR-020). `chat` appends its prompt as a
+    /// user turn after it. `msgs` is caller-owned and must outlive `chat`.
+    pub fn history(self: Agent, msgs: []const Message) Agent {
+        var s = self;
+        s.history_ = msgs;
+        return s;
+    }
+
+    /// Cap the number of model round-trips one `chat` makes (default 10). A
+    /// loop still asking for tools after `n` rounds fails with
+    /// `error.MaxToolIterations`.
+    pub fn maxToolIterations(self: Agent, n: usize) Agent {
+        var s = self;
+        s.max_tool_iterations_ = n;
+        return s;
+    }
+
     fn chatConfig(self: *const Agent, prompt: []const u8) request.ChatConfig {
         return .{
             .provider = self.provider,
@@ -112,17 +137,8 @@ pub const Agent = struct {
         return body;
     }
 
-    /// Send the tool-def request and return the parsed reply — ONE round.
-    ///
-    /// The multi-turn auto-execution loop (run the model's chosen tool, feed the
-    /// result back, repeat until it stops asking) is NOT implemented. It is not
-    /// blocked on the send path, which now exists: it needs multi-turn MESSAGE
-    /// support in `request.ChatConfig`, which today carries a single `prompt`.
-    /// Adding a message array means changing `buildChatBody` — the function
-    /// whose exact bytes seven SDKs assert against shared goldens — so it is its
-    /// own slice, not a rider on this one. `Tool.run` is carried on the builder
-    /// and ready for that loop; until then a caller drives tool execution
-    /// themselves from the reply.
+    /// Run the tool loop and return the final reply. Its `usage` sums every
+    /// round; a dimension any round left unreported stays unreported (ADR-081).
     pub fn chat(
         self: Agent,
         arena: std.mem.Allocator,
@@ -132,7 +148,9 @@ pub const Agent = struct {
         return send.withTransport(&self.ctx, @TypeOf(self).chatWith, self, .{ arena, api_key, prompt });
     }
 
-    /// `chat` over an injected transport (the seam tests mock).
+    /// `chat` over an injected transport (the seam tests mock). Everything the
+    /// loop builds — the growing history, the bodies, the tool results — lives
+    /// in `arena`.
     pub fn chatWith(
         self: Agent,
         transport: http.Transport,
@@ -140,27 +158,119 @@ pub const Agent = struct {
         api_key: []const u8,
         prompt: []const u8,
     ) !response.Response {
-        const body = try self.buildBody(arena, prompt);
-        const reply = try send.postJsonWithText(transport, arena, .{
-            .provider = self.provider,
-            .ctx = &self.ctx,
-            .api_key = api_key,
-            .endpoint = providers.spec(self.provider).endpoint,
-            .op = .llm_request,
-            .model = self.model_ orelse "",
-        }, body);
+        const spec = providers.spec(self.provider);
         // The agent exposes no protocol opt-in, so the effective shape is the
         // provider's default — the same fact `applyToolDefs` dispatches on.
-        const shape = providers.spec(self.provider).chat_wire_shape;
-        var resp = (try response.decodeResponse(arena, self.provider, shape, reply.value)).response;
-        // ADR-085: capture the turn from the reply BYTES (see client.zig). The
-        // single-round terminal returns it so a caller running their own loop can
-        // thread it forward; the auto-execution loop that would REPLAY it lands
-        // with the multi-turn history builder (provider_turn.zig scope note).
-        resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);
-        return resp;
+        const shape = spec.chat_wire_shape;
+        const model_id = try request.effectiveModel(spec, self.model_);
+
+        var turns: std.ArrayList(Message) = .empty;
+        try turns.appendSlice(arena, self.history_);
+        if (prompt.len > 0) try turns.append(arena, .{
+            .role = "user",
+            .content = prompt,
+            .tool_calls = &.{},
+            .tool_result = null,
+            .provider_turn = null,
+        });
+
+        var total: ?response.Usage = null;
+        var round: usize = 0;
+        while (round < self.max_tool_iterations_) : (round += 1) {
+            var cfg = self.chatConfig("");
+            cfg.history = turns.items;
+            var body = try request.buildChatBody(arena, cfg);
+            if (self.tool_count_ > 0)
+                try applyToolDefs(arena, &body, self.provider, self.tools_[0..self.tool_count_]);
+
+            const reply = try send.postJsonWithText(transport, arena, .{
+                .provider = self.provider,
+                .ctx = &self.ctx,
+                .api_key = api_key,
+                .endpoint = try request.chatEndpoint(arena, cfg),
+                .op = .llm_request,
+                .model = model_id,
+            }, body);
+            var resp = (try response.decodeResponse(arena, self.provider, shape, reply.value)).response;
+            // ADR-085: capture the turn from the reply BYTES (see client.zig);
+            // the next round replays it.
+            resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);
+            total = if (total) |t| addUsage(t, resp.usage) else resp.usage;
+
+            const calls = try messages.extractToolCalls(arena, reply.value, self.provider, shape);
+            if (calls.len == 0) {
+                resp.usage = total.?;
+                return resp;
+            }
+            try turns.append(arena, .{
+                .role = "assistant",
+                .content = "",
+                .tool_calls = calls,
+                .tool_result = null,
+                .provider_turn = resp.provider_turn,
+            });
+            for (calls) |call| {
+                const result = try self.runTool(arena, call, model_id);
+                try turns.append(arena, .{
+                    .role = "tool",
+                    .content = "",
+                    .tool_calls = &.{},
+                    .tool_result = .{ .tool_use_id = call.id, .content = result },
+                    .provider_turn = null,
+                });
+            }
+        }
+        return error.MaxToolIterations;
+    }
+
+    /// Run one tool call between `tool_call` middleware events. A pre-phase
+    /// veto stops the loop with `error.MiddlewareVeto`.
+    fn runTool(self: *const Agent, arena: std.mem.Allocator, call: ToolCall, model_id: []const u8) ![]const u8 {
+        const mws = self.ctx.middlewares();
+        const args = try json.stringify(arena, call.input orelse json.object());
+        const base = middleware.Event{
+            .op = .tool_call,
+            .phase = .pre,
+            .provider = @tagName(self.provider),
+            .model = model_id,
+            .tool = call.name,
+            .args = args,
+        };
+        var veto_reason: []const u8 = "";
+        try middleware.firePre(mws, base, &veto_reason);
+
+        const result = if (self.findTool(call.name)) |tool| blk: {
+            const run = tool.run orelse break :blk try std.fmt.allocPrint(arena, "error: tool \"{s}\" has no run function", .{call.name});
+            break :blk run(arena, args) catch |err| try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)});
+        } else try std.fmt.allocPrint(arena, "error: unknown tool \"{s}\"", .{call.name});
+
+        var post = base;
+        post.args = "";
+        post.result = result;
+        middleware.firePost(mws, post);
+        return result;
+    }
+
+    fn findTool(self: *const Agent, name: []const u8) ?Tool {
+        for (self.tools_[0..self.tool_count_]) |t| {
+            if (std.mem.eql(u8, t.name, name)) return t;
+        }
+        return null;
     }
 };
+
+/// Add two usages dimension by dimension. A dimension either side left
+/// unreported stays unreported: a sum that silently skipped a round would read
+/// as a measurement (ADR-081). Mirrors Rust `accumulate_usage`.
+fn addUsage(a: response.Usage, b: response.Usage) response.Usage {
+    var out: response.Usage = .{};
+    inline for (std.meta.fields(response.Usage)) |f| {
+        const x = @field(a, f.name);
+        const y = @field(b, f.name);
+        @field(out, f.name) = if (x != null and y != null) x.? + y.? else null;
+    }
+    return out;
+}
 
 /// Attach the tool definitions to `body`, dispatching on the effective chat wire
 /// shape. The schema string is parsed once and inserted VERBATIM (no strict
