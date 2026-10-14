@@ -377,13 +377,161 @@ fn wireTool() Tool {
     return .{ .name = "get_weather", .description = "Get the current weather for a city.", .schema = wire_tool_schema };
 }
 
-
 /// A `Ctx` for the pure-seam tests below. Those tests exercise body/header
 /// construction only, so the transport dependencies are never used — but Zig
 /// has no ambient allocator or `Io`, so they must still be named.
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// === Tool-loop tests ===
+
+/// Records the tool_call events an agent fires, and can veto them.
+const ToolHook = struct {
+    gpa: std.mem.Allocator,
+    events: std.ArrayList(middleware.Event) = .empty,
+    veto: bool = false,
+
+    fn call(ptr: *anyopaque, ev: *const middleware.Event) ?[]const u8 {
+        const self: *ToolHook = @ptrCast(@alignCast(ptr));
+        if (ev.op != .tool_call) return null;
+        self.events.append(self.gpa, ev.*) catch {};
+        if (self.veto and ev.phase == .pre) return "vetoed in test";
+        return null;
+    }
+
+    fn hook(self: *ToolHook) middleware.Middleware {
+        return .{ .ptr = self, .call_fn = call };
+    }
+};
+
+fn weatherRun(arena: std.mem.Allocator, args_json: []const u8) anyerror![]const u8 {
+    const args = try std.json.parseFromSliceLeaky(json.Value, arena, args_json, .{});
+    return std.fmt.allocPrint(arena, "12C in {s}", .{json.getPath(args, "city").?.string});
+}
+
+fn runnableTool() Tool {
+    var t = wireTool();
+    t.run = weatherRun;
+    return t;
+}
+
+fn sentBody(arena: std.mem.Allocator, mock: *const http.MockTransport, i: usize) !json.Value {
+    return std.json.parseFromSliceLeaky(json.Value, arena, mock.captured.items[i].body, .{});
+}
+
+const openai_call_reply =
+    \\{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Oslo\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}
+;
+const openai_final_reply =
+    \\{"choices":[{"message":{"role":"assistant","content":"It is 12C in Oslo."},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":6}}
+;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
