@@ -1,8 +1,6 @@
 //! llmkit — the Zig client for llmkit. One typed API across many LLM providers.
 //!
-//! Phase 0 vertical slice: the JSON waist, the OpenAI-shape request builder,
-//! and the public client + Text builder. HTTP send, the remaining wire shapes,
-//! and the media/async capabilities arrive in later phases.
+//! Start at `Client.init`; every capability is a builder reached from it.
 
 const std = @import("std");
 
