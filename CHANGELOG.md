@@ -130,6 +130,8 @@ These are not supported yet:
 - **Raw responses.** The `raw` field on responses is always null; there is no
   way to request it.
 - **Telemetry export.** The client does not send OpenTelemetry spans.
+- **Streaming with `protocol(.responses)`** returns empty text: Responses
+  stream events are not read yet.
 
 - **Video generation is submit-only.** `video().submit` returns the provider's
   job id, but there is no poll/wait runtime, so a caller must poll the provider
