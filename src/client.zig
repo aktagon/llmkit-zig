@@ -25,6 +25,7 @@ const send = @import("send.zig");
 const provider_turn = @import("provider_turn.zig");
 const capability = @import("capability.zig");
 const middleware = @import("middleware.zig");
+const caching_mod = @import("caching.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -491,6 +492,9 @@ pub const Text = struct {
         text_prompt: []const u8,
     ) !response_mod.Response {
         const cfg = self.chatConfig(text_prompt);
+        const model_id = try request.effectiveModel(providers.spec(self.provider), cfg.model);
+        var body = try request.buildChatBody(arena, cfg);
+        if (cfg.caching) try caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body);
         const reply = try send.postJsonWithText(transport, arena, .{
             .provider = self.provider,
             .ctx = &self.ctx,
@@ -498,8 +502,8 @@ pub const Text = struct {
             .endpoint = try request.chatEndpoint(arena, cfg),
             .extra_headers = try request.buildRequestHeaders(arena, cfg),
             .op = .llm_request,
-            .model = try request.effectiveModel(providers.spec(self.provider), cfg.model),
-        }, try request.buildChatBody(arena, cfg));
+            .model = model_id,
+        }, body);
         // The EFFECTIVE wire shape — the same one buildChatBody resolved — so a
         // `.protocol(.responses)` reply is decoded with the Responses envelope
         // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
@@ -561,7 +565,11 @@ pub const Text = struct {
         api_key: []const u8,
         prompts: []const []const u8,
     ) !batch_mod.BatchHandle {
-        const built = try batch_mod.buildBatchBody(arena, self.provider, self.chatConfig(""), prompts);
+        var built = try batch_mod.buildBatchBody(arena, self.provider, self.chatConfig(""), prompts);
+        if (self.caching_) {
+            const model_id = try request.effectiveModel(providers.spec(self.provider), self.model_);
+            try batch_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &built.payload);
+        }
         return batch_mod.submitWith(transport, arena, &self.ctx, self.provider, api_key, built, self.raw_);
     }
 };

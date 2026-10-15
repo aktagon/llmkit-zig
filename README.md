@@ -288,7 +288,7 @@ const resp = try client.text()
 std.debug.print("cache write {?d}, cache read {?d}\n", .{ resp.usage.cache_write, resp.usage.cache_read });
 ```
 
-`caching()` marks the request for prompt caching where the provider supports it (Anthropic `cache_control`). Creating a cache resource ahead of time (Google `cachedContents`) is not yet supported.
+`caching()` marks the request for prompt caching where the provider supports it. On Anthropic it adds `cache_control` to the system prompt. On Google it first creates a `cachedContents` resource holding the system prompt, then sends the request with a reference to it.
 
 ### Model catalogue
 
@@ -385,7 +385,6 @@ Every builder also has `addMiddleware`. A hook added there fires for that builde
 - **Streaming** for the Bedrock chat shape, and with `protocol(.responses)`. OpenAI-compatible providers, Anthropic and Google stream.
 - **Video polling:** `Video.submit` returns a handle with the job id; fetching the result is not available.
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
-- **Cache resources:** creating a Google `cachedContents` resource ahead of time.
 - **Telemetry export:** the client does not send OpenTelemetry spans.
 
 ## Mirror
