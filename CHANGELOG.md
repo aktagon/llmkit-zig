@@ -43,6 +43,11 @@ First release.
 
 ### Added
 
+- **Asynchronous transcription jobs.** `transcription().submit` returns a
+  `TranscriptionHandle`. `handle.poll` makes one request and returns the job
+  state; `handle.wait` polls until the job succeeds or fails, and gives up with
+  `error.PollTimeout` after 10 minutes. A provider failure is a `.failed` state
+  whose `cause.message` carries the provider's message.
 - **Conversation history.** `Text.history(messages)` sends earlier turns before
   the prompt. An assistant `Message` that carries the `provider_turn` from an
   earlier response is sent back exactly as the provider returned it, so
@@ -144,5 +149,5 @@ These are not supported yet:
 
 Also not yet implemented: Google's `ResourceCaching` pre-hop (explicit
 `cache_control` caching works), the live `/models` catalogue send (the
-compiled-in catalogue and request assembly work), and polling asynchronous
-transcription jobs.
+compiled-in catalogue and request assembly work), and the upload hop for
+asynchronous transcription (submit takes a public audio URL).

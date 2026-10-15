@@ -231,6 +231,20 @@ const resp = try client.transcription()
 std.debug.print("{s}\n", .{resp.text});
 ```
 
+Asynchronous providers (AssemblyAI) take a public audio URL and return a handle. `poll` makes one request and reports the job state; `wait` polls until the job finishes.
+
+```zig
+const handle = try client.transcription()
+    .submit(arena, key, "https://storage.example.com/meeting.mp3");
+
+const st = try handle.wait(arena);
+switch (st.state) {
+    .succeeded => std.debug.print("{s}\n", .{st.result.?.text}),
+    .failed => std.debug.print("failed: {s}\n", .{st.cause.?.message}),
+    .running => unreachable, // wait returns only a finished job
+}
+```
+
 ### Upload
 
 ```zig
@@ -371,7 +385,6 @@ The `ptr` is yours: point it at whatever state the hook needs. It must outlive e
 - **AWS Bedrock:** requests are not signed, so Bedrock calls cannot be sent.
 - **Streaming** for the Anthropic and Bedrock chat shapes, and with `protocol(.responses)`. OpenAI-compatible providers and Google stream over Chat Completions.
 - **Video polling:** `Video.submit` returns the job id; fetching the result is not available.
-- **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
 - **Cache resources:** creating a Google `cachedContents` resource ahead of time.
 - **Raw responses:** the `raw` field on responses is always null.
 - **Telemetry export:** the client does not send OpenTelemetry spans.
