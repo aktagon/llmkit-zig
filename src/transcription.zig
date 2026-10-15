@@ -1,15 +1,14 @@
 //! Transcription (speech-to-text, ADR-048 / ADR-051 Slice 3) — a mirror of
-//! rust/src/builders/transcription.rs and go/transcription.go, minus the
-//! bytes-upload hop.
+//! rust/src/builders/transcription.rs and go/transcription.go.
 //!
 //! Two request encodings, dispatched on the provider's generated
 //! `request_encoding` fact (never a provider-name switch):
 //!   - `json` (AssemblyAI, ASYNC submit) — `Transcription.submit` POSTs the flat
-//!     `{audio_url}` body and returns a `TranscriptionHandle`; its `poll` /
+//!     `{audio_url}` body (uploading `Audio.bytes` first, to get that url) and
+//!     returns a `TranscriptionHandle`; its `poll` /
 //!     `wait` run on the shared `job.zig` engine (ADR-062) through
 //!     `TranscriptionAdapter`. The lifecycle-wire `transcription-{succeeded,
-//!     failed}` goldens assert the normalized JobStatus. The bytes-upload hop
-//!     (bytes -> upload_url) is not implemented: submit takes a public URL.
+//!     failed}` goldens assert the normalized JobStatus.
 //!   - `multipart` (OpenAI, SYNC transcribe) — `Transcription.buildMultipartBody`
 //!     produces a REAL encoded multipart/form-data body (fixed field order model /
 //!     response_format / file) plus the boundary it used, so the request-wire

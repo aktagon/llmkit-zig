@@ -20,8 +20,8 @@
 //!     bytes, Bedrock with no S3 uri) is an error, not an empty success.
 //!
 //! A failed job is a `JobStatus{.failed}` whose `cause.message` carries the
-//! provider's message where it gives one. Bedrock caveat: the poll is not
-//! SigV4-signed, the same limitation as every other Zig Bedrock send.
+//! provider's message where it gives one. Every hop goes through
+//! `send.sendUnobserved`, so a Bedrock poll is SigV4-signed.
 
 const std = @import("std");
 const http = @import("http.zig");
@@ -158,6 +158,8 @@ const VideoAdapter = struct {
         // fetch URI; GET it into bytes and clear the url (source XOR).
         if (std.mem.eql(u8, vg.output_delivery, "DeliveryDownload"))
             resp = try self.download(arena, resp);
+        // ADR-014: raw is the terminal poll body, not a file or download hop's.
+        if (self.handle.value.raw) resp.raw = pb.value;
         return resp;
     }
 
