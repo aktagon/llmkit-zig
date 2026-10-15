@@ -228,6 +228,15 @@ pub fn videoGenConfig(provider: ProviderName) ?VideoGenDef {
             .requires_output_uri = false,
             .models = &.{
                 .{
+                    .model_id = "veo-3.1-generate-001",
+                    .label = "Veo 3.1",
+                    .supports_image_to_video = false,
+                    .max_duration_seconds = 8,
+                    .output_mime = "video/mp4",
+                    .resolutions = &.{ "1080p", "4k", "720p" },
+                    .max_input_images = 0,
+                },
+                .{
                     .model_id = "veo-3.1-generate-preview",
                     .label = "Veo 3.1",
                     .supports_image_to_video = false,
