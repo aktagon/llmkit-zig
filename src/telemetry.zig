@@ -11,19 +11,22 @@
 //!     seam. `error.type` is read verbatim from `Event.err_type`, stamped
 //!     structurally from the typed error the one place it still exists, never
 //!     re-parsed from a message string.
-//!   - `Telemetry` config + `httpExport` — the fail-open OTLP/HTTP exporter over
-//!     the `http.Transport` seam (runtime completeness; not golden-gated).
+//!   - `Telemetry` + `Client.addTelemetry` — the export hook on the middleware
+//!     seam. Every post-phase event becomes one OTLP span, handed synchronously
+//!     to the caller's `export` callback (ADR-059). `HttpExport` is the
+//!     batteries callback: a fail-open OTLP/HTTP POST over the `http.Transport`
+//!     seam.
 //!
 //! The OTEL GenAI binding facts (semconv version, attribute keys, the
 //!
 //! `providers/generated/telemetry_gen.zig`; this handwritten layer only carries
-//! runtime behaviour. Zig has no middleware fire-site wiring yet (send-path
-//! coverage is minimal), so the exporter is provided for completeness but is not
-//! fired from any send path — the telemetry SURFACE, not the seam.
+//! runtime behaviour.
 
 const std = @import("std");
 const json = @import("json.zig");
 const http = @import("http.zig");
+const middleware = @import("middleware.zig");
+const send = @import("send.zig");
 const gen = @import("providers/generated/telemetry_gen.zig");
 const middleware_gen = @import("providers/generated/middleware_gen.zig");
 
@@ -32,10 +35,12 @@ pub const MiddlewarePhase = middleware_gen.MiddlewarePhase;
 
 /// Token accounting an `Event` carries into the span (the OTEL usage
 /// attributes). Mirrors the input/output the Rust `middleware::Usage` feeds the
-/// telemetry builder; other dimensions are not exported today.
+/// telemetry builder; other dimensions are not exported today. Null means the
+/// provider did not report the dimension (AVAIL-006): a reported zero is still
+/// exported.
 pub const Usage = struct {
-    input: i64 = 0,
-    output: i64 = 0,
+    input: ?i64 = null,
+    output: ?i64 = null,
 };
 
 /// The middleware observation event telemetry renders. `usage` is null until the
@@ -113,15 +118,72 @@ pub fn setEventError(ev: *Event, err: CallError) void {
     }
 }
 
-/// Opt-in observability config (ADR-059). `endpoint` is required (empty is a
-/// loud construction error at `httpExport`); `headers` ride each OTLP POST;
-/// `capture_content` gates tier-2 payloads (default `false` for privacy — the
-/// event carries no payload yet, so this reserves the semantics).
-pub const Telemetry = struct {
-    endpoint: []const u8,
-    headers: []const http.Header = &.{},
-    capture_content: bool = false,
+/// The export callback: receives the finished OTLP/HTTP proto3-JSON bytes for
+/// one span, called synchronously on the post phase. The same type-erased
+/// `{ptr, fn}` pair as `Middleware`, because a Zig function pointer cannot
+/// capture state. The bytes are valid only for the duration of the call.
+pub const Export = struct {
+    ptr: *anyopaque,
+    call_fn: *const fn (ptr: *anyopaque, payload: []const u8) void,
+
+    pub fn call(self: Export, payload: []const u8) void {
+        self.call_fn(self.ptr, payload);
+    }
 };
+
+/// Opt-in observability config (ADR-059). Attach it with
+/// `Client.addTelemetry`: every operation the client performs then emits one
+/// OTEL GenAI-aligned span, handed to `export`. `export` is a required field,
+/// so an enabled-but-no-sink config cannot be built (TEL-017). Use
+/// `HttpExport` for the batteries POST, or supply your own callback to bridge
+/// into an existing OTEL stack. `capture_content` gates tier-2 payloads
+/// (default `false` for privacy); the event carries no payload yet, so this
+/// reserves the semantics.
+pub const Telemetry = struct {
+    @"export": Export,
+    capture_content: bool = false,
+    /// The client allocator and `Io` the hook builds each span with (span
+    /// identity needs `Io.random`, timing needs the clock). Set by
+    /// `Client.addTelemetry`; callers leave it null.
+    bound: ?Binding = null,
+
+    pub const Binding = struct { gpa: std.mem.Allocator, io: std.Io };
+
+    /// The middleware hook `Client.addTelemetry` attaches. Borrows `self`, so
+    /// the `Telemetry` must outlive every client that holds it.
+    pub fn hook(self: *Telemetry) middleware.Middleware {
+        return .{ .ptr = self, .call_fn = onEvent };
+    }
+
+    /// Post phase only: build the OTLP span and call `export`. Fail-open: a
+    /// span that cannot be built (out of memory) is dropped, and the callback
+    /// returns nothing, so telemetry never fails or vetoes the call.
+    fn onEvent(ptr: *anyopaque, ev: *const Event) ?[]const u8 {
+        const self: *Telemetry = @ptrCast(@alignCast(ptr));
+        if (ev.phase != .post) return null;
+        const b = self.bound orelse return null;
+        var arena_state = std.heap.ArenaAllocator.init(b.gpa);
+        defer arena_state.deinit();
+        const payload = buildTelemetryPayload(arena_state.allocator(), b.io, ev) catch return null;
+        self.@"export".call(payload);
+        return null;
+    }
+};
+
+/// Production wrapper: fresh span identity + the wall clock around the pure
+/// event-level builder. Start and end are both "now", as in Go and Rust: the
+/// post event does not carry the call's start time.
+fn buildTelemetryPayload(arena: std.mem.Allocator, io: std.Io, ev: *const Event) ![]const u8 {
+    const now = std.Io.Clock.real.now(io).nanoseconds;
+    const now_text = try std.fmt.allocPrint(arena, "{d}", .{now});
+    var trace_bytes: [16]u8 = undefined;
+    var span_bytes: [8]u8 = undefined;
+    io.random(&trace_bytes);
+    io.random(&span_bytes);
+    const trace_hex = std.fmt.bytesToHex(trace_bytes, .lower);
+    const span_hex = std.fmt.bytesToHex(span_bytes, .lower);
+    return buildTelemetryPayloadAt(arena, ev, &trace_hex, &span_hex, now_text, now_text);
+}
 
 /// Build one attribute object `{"key": key, "value": {"stringValue": val}}`.
 fn stringAttr(arena: std.mem.Allocator, key: []const u8, val: []const u8) !json.Value {
@@ -153,15 +215,15 @@ fn intAttr(arena: std.mem.Allocator, key: []const u8, n: i64) !json.Value {
 /// Encoding notes (OTLP/JSON spec): int64 fields (times, token counts) render as
 /// STRINGS; `traceId`/`spanId` are hex; each attribute `value` object carries
 /// exactly one of `stringValue` XOR `intValue`; usage attributes are present
-/// only when non-zero; `error.type` + the span `status` (`code: 2`) are present
+/// only when reported, zero included (AVAIL-006); `error.type` + the span `status` (`code: 2`) are present
 /// only on error.
 pub fn buildOtlpTraces(
     arena: std.mem.Allocator,
     op_name: []const u8,
     provider: []const u8,
     model: []const u8,
-    input_tokens: i64,
-    output_tokens: i64,
+    input_tokens: ?i64,
+    output_tokens: ?i64,
     error_type: []const u8,
     trace_id: []const u8,
     span_id: []const u8,
@@ -172,10 +234,10 @@ pub fn buildOtlpTraces(
     try attributes.array.append(try stringAttr(arena, gen.otel_attr_op, op_name));
     try attributes.array.append(try stringAttr(arena, gen.otel_attr_provider, provider));
     try attributes.array.append(try stringAttr(arena, gen.otel_attr_model, model));
-    if (input_tokens > 0)
-        try attributes.array.append(try intAttr(arena, gen.otel_usage_input, input_tokens));
-    if (output_tokens > 0)
-        try attributes.array.append(try intAttr(arena, gen.otel_usage_output, output_tokens));
+    if (input_tokens) |n|
+        try attributes.array.append(try intAttr(arena, gen.otel_usage_input, n));
+    if (output_tokens) |n|
+        try attributes.array.append(try intAttr(arena, gen.otel_usage_output, n));
     if (error_type.len > 0)
         try attributes.array.append(try stringAttr(arena, gen.otel_attr_err_type, error_type));
 
@@ -238,8 +300,8 @@ pub fn buildTelemetryPayloadAt(
     end_ns: []const u8,
 ) ![]const u8 {
     const op = gen.operationName(ev.op) orelse @tagName(ev.op);
-    const input: i64 = if (ev.usage) |u| u.input else 0;
-    const output: i64 = if (ev.usage) |u| u.output else 0;
+    const input: ?i64 = if (ev.usage) |u| u.input else null;
+    const output: ?i64 = if (ev.usage) |u| u.output else null;
     return buildOtlpTraces(
         arena,
         op,
@@ -255,36 +317,75 @@ pub fn buildTelemetryPayloadAt(
     );
 }
 
-/// Fail-open OTLP/HTTP exporter over the transport seam: POST `payload` to
-/// `tel.endpoint` + `/v1/traces` with the configured headers. An EMPTY endpoint
-/// is a loud construction error (`error.TelemetryEndpointRequired`, the honest
-/// contract TEL-017); a transport FAILURE is swallowed (fail-open — telemetry
-/// never surfaces on the request path). Mirrors Rust `http_export`.
+/// The batteries export callback: POSTs each OTLP payload to `endpoint` +
+/// `/v1/traces` with the given headers, fail-open (every transport error and
+/// non-2xx reply is swallowed). Mirrors Go `HTTPExport` / Rust `http_export`.
 ///
-/// Not fired from any send path today (Zig has no middleware seam); provided so
-/// a caller can drive it directly, or a future middleware wiring can call it.
-pub fn httpExport(
-    arena: std.mem.Allocator,
-    transport: http.Transport,
-    tel: Telemetry,
-    payload: []const u8,
-) !void {
-    if (tel.endpoint.len == 0) return error.TelemetryEndpointRequired;
+/// Low-volume only: the POST is synchronous on the request path, so a slow
+/// collector adds up to 5 s of latency to the call. For high volume,
+/// supply your own `Export` that enqueues into your OTEL SDK's batch processor.
+/// `endpoint` and `headers` are borrowed and must outlive the exporter.
+pub const HttpExport = struct {
+    /// The send context: allocator, `Io`, the collector timeout (5 s), and an
+    /// optional transport override (the test seam).
+    ctx: http.Ctx,
+    endpoint: []const u8,
+    headers: []const http.Header = &.{},
 
-    const trimmed = std.mem.trimEnd(u8, tel.endpoint, "/");
-    const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ trimmed, gen.traces_path });
+    /// An empty endpoint is a loud construction error (TEL-017): there is no
+    /// enabled-but-no-sink state.
+    pub fn init(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        endpoint: []const u8,
+        headers: []const http.Header,
+    ) error{TelemetryEndpointRequired}!HttpExport {
+        if (endpoint.len == 0) return error.TelemetryEndpointRequired;
+        return .{
+            .ctx = .{ .gpa = gpa, .io = io, .timeout_ms = 5_000 },
+            .endpoint = endpoint,
+            .headers = headers,
+        };
+    }
 
-    var hdrs: std.ArrayList(http.Header) = .empty;
-    try hdrs.append(arena, .{ .name = "content-type", .value = "application/json" });
-    for (tel.headers) |h| try hdrs.append(arena, h);
+    /// Return a copy that sends through `t` instead of a production transport.
+    pub fn withTransport(self: HttpExport, t: http.Transport) HttpExport {
+        var e = self;
+        e.ctx = e.ctx.withTransport(t);
+        return e;
+    }
 
-    _ = transport.send(arena, .{
-        .method = .POST,
-        .url = url,
-        .headers = hdrs.items,
-        .body = payload,
-    }) catch return; // fail-open
-}
+    /// The `Export` callback for `Telemetry.export`. Borrows `self`.
+    pub fn exporter(self: *HttpExport) Export {
+        return .{ .ptr = self, .call_fn = exportImpl };
+    }
+
+    fn exportImpl(ptr: *anyopaque, payload: []const u8) void {
+        const self: *HttpExport = @ptrCast(@alignCast(ptr));
+        var arena_state = std.heap.ArenaAllocator.init(self.ctx.gpa);
+        defer arena_state.deinit();
+        // Fail-open: a transport error never reaches the instrumented call.
+        send.withTransport(&self.ctx, post, self, .{ arena_state.allocator(), payload }) catch {};
+    }
+
+    fn post(self: *HttpExport, transport: http.Transport, arena: std.mem.Allocator, payload: []const u8) !void {
+        const trimmed = std.mem.trimEnd(u8, self.endpoint, "/");
+        const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ trimmed, gen.traces_path });
+
+        var hdrs: std.ArrayList(http.Header) = .empty;
+        try hdrs.append(arena, .{ .name = "content-type", .value = "application/json" });
+        for (self.headers) |h| try hdrs.append(arena, h);
+
+        _ = try transport.send(arena, .{
+            .method = .POST,
+            .url = url,
+            .headers = hdrs.items,
+            .body = payload,
+        });
+    }
+};
+
+
 
 
 

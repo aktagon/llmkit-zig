@@ -111,7 +111,8 @@ pub const providerInfo = provider_info.providerInfo;
 pub const Telemetry = telemetry.Telemetry;
 pub const Event = telemetry.Event;
 pub const buildOtlpTraces = telemetry.buildOtlpTraces;
-pub const httpExport = telemetry.httpExport;
+pub const HttpExport = telemetry.HttpExport;
+pub const TelemetryExport = telemetry.Export;
 pub const setEventError = telemetry.setEventError;
 
 

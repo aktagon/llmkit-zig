@@ -48,6 +48,17 @@ First release.
   secret access key, the optional session token, and the region; the access
   key ID is the terminal's key. A Bedrock send without them fails with
   `error.MissingAwsCredentials`.
+- **Telemetry export.** `Client.addTelemetry(&tel)` emits one OpenTelemetry
+  span per operation and hands the OTLP bytes to `tel.export`. `HttpExport` is
+  the ready-made callback that POSTs to `<endpoint>/v1/traces`. Export is
+  synchronous and fail-open: a collector error never fails the call.
+- **Live model catalogue.** `models().provider(p).list(arena, key)` reads the
+  provider's `/models` endpoint and follows pagination; `provider(p).get`
+  fetches one model. Results carry the known capabilities, and `raw()` keeps
+  the provider's record. A key without the models scope returns
+  `error.Scope`.
+- The middleware post event for a chat request (prompt, stream, and each agent
+  round) now carries the reply's token usage.
 - **Conversation history.** `Text.history(messages)` sends earlier turns before
   the prompt. An assistant `Message` that carries the `provider_turn` from an
   earlier response is sent back exactly as the provider returned it, so
@@ -142,7 +153,6 @@ First release.
 
 These are not supported yet:
 
-- **Telemetry export.** The client does not send OpenTelemetry spans.
 - **Streaming with `protocol(.responses)`** returns empty text: Responses
   stream events are not read yet.
 
@@ -150,6 +160,4 @@ These are not supported yet:
   the provider's job id, but there is no poll/wait runtime, so a caller must
   poll the provider themselves.
 
-Also not yet implemented: the live `/models` catalogue send (the compiled-in
-catalogue and request assembly work), and polling asynchronous transcription
-jobs.
+Also not yet implemented: polling asynchronous transcription jobs.
