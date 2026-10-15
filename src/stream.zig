@@ -210,7 +210,6 @@ pub fn streamWith(
 ) !response.Response {
     var body = try buildStreamBody(arena, cfg);
     const model = try request.effectiveModel(providers.spec(cfg.provider), cfg.model);
-    if (cfg.caching) try caching_mod.applyResourceCaching(transport, arena, ctx, cfg.provider, api_key, model, &body);
     // A provider that streams from its own endpoint declares it (Google
     // `:streamGenerateContent?alt=sse`); the rest stream from the chat endpoint
     // of the effective protocol (`/v1/responses` under `.protocol(.responses)`).
@@ -229,7 +228,11 @@ pub fn streamWith(
         .op = .llm_request,
         .model = model,
         .post = .by_caller,
+        .pre = .by_caller,
     };
+    try send.firePre(args);
+    if (cfg.caching) caching_mod.applyResourceCaching(transport, arena, ctx, cfg.provider, api_key, model, &body) catch |err|
+        return send.closeFailed(args, err);
     const raw = try send.postRaw(transport, arena, args, try json.stringify(arena, body), "application/json");
     const resp = parseSseBuffer(arena, cfg.provider, shape, raw, on_chunk) catch |err| {
         send.firePostDecodeError(args);
