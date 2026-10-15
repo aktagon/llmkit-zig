@@ -43,6 +43,11 @@ First release.
 
 ### Added
 
+- **AWS Bedrock sends.** Every Bedrock request (text, agent, and video submit)
+  is signed with AWS Signature Version 4. `Client.awsCredentials` takes the
+  secret access key, the optional session token, and the region; the access
+  key ID is the terminal's key. A Bedrock send without them fails with
+  `error.MissingAwsCredentials`.
 - **Conversation history.** `Text.history(messages)` sends earlier turns before
   the prompt. An assistant `Message` that carries the `provider_turn` from an
   earlier response is sent back exactly as the provider returned it, so
@@ -125,8 +130,6 @@ First release.
 
 These are not supported yet:
 
-- **AWS Bedrock cannot send.** Requests are not signed, so Bedrock rejects
-  them.
 - **Raw responses.** The `raw` field on responses is always null; there is no
   way to request it.
 - **Telemetry export.** The client does not send OpenTelemetry spans.
