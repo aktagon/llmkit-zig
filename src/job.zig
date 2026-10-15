@@ -107,7 +107,7 @@ pub const Verdict = struct {
 
 /// The config-backed default classify: the status at `status_path` against the
 /// done/error sets, plus the message at `error_message_path` on failure.
-pub fn classifyBody(cfg: LifecycleConfig, pb: PollBody) Verdict {
+fn classifyBody(cfg: LifecycleConfig, pb: PollBody) Verdict {
     const raw = pb.status(cfg.status_path);
     const c = classifyByConfig(cfg, raw);
     return .{
