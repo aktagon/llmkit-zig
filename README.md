@@ -62,7 +62,18 @@ const ollama = llmkit.Client.init(gpa, io, .ollama);
 _ = .{ anthropic, openai, google, ollama };
 ```
 
-35 providers, with three chat API shapes that send today: OpenAI-compatible, Anthropic Messages, and Google Generative AI. Dedicated image, video, music, speech, and transcription providers are also supported. AWS Bedrock is not yet supported for sending; see [Not yet supported](#not-yet-supported).
+35 providers, with four chat API shapes: OpenAI-compatible, Anthropic Messages, Google Generative AI, and AWS Bedrock Converse. Dedicated image, video, music, speech, and transcription providers are also supported.
+
+AWS Bedrock requests are signed with AWS Signature Version 4. Pass the access key ID as the key, and the rest of the credentials on the client:
+
+```zig
+const bedrock = llmkit.Client.init(gpa, io, .bedrock).awsCredentials(.{
+    .secret_access_key = env.get("AWS_SECRET_ACCESS_KEY") orelse return error.MissingKey,
+    .session_token = env.get("AWS_SESSION_TOKEN") orelse "", // only for temporary credentials
+    .region = env.get("AWS_REGION") orelse return error.MissingRegion,
+});
+const resp = try bedrock.text().prompt(arena, access_key_id, "Why is the sky blue?");
+```
 
 ## API
 
@@ -371,7 +382,6 @@ Every builder also has `addMiddleware`. A hook added there fires for that builde
 
 ## Not yet supported
 
-- **AWS Bedrock:** requests are not signed, so Bedrock calls cannot be sent.
 - **Streaming** for the Bedrock chat shape, and with `protocol(.responses)`. OpenAI-compatible providers, Anthropic and Google stream.
 - **Video polling:** `Video.submit` returns a handle with the job id; fetching the result is not available.
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.

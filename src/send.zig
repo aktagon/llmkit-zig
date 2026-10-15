@@ -3,8 +3,9 @@
 //! Each capability's terminal is `buildBody -> send -> parse*Response`. This
 //! module is the middle third, and it exists so the parts that are IDENTICAL
 //! across capabilities live once: URL assembly (base-URL override + the
-//! QueryParamKey splice), header composition (auth + contract + content-type +
-//! custom), the middleware pre/post fire pair, and the non-2xx check.
+//! QueryParamKey splice + the SigV4 region), header composition (auth or SigV4
+//! signature + contract + content-type + custom), the middleware pre/post fire
+//! pair, and the non-2xx check.
 //!
 //! That N=1 discipline is the point. The alternative — each terminal assembling
 //! its own URL and headers — is exactly the "remember to do X in N places" shape
@@ -21,6 +22,8 @@ const json = @import("json.zig");
 const http = @import("http.zig");
 const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
+const request_defs = @import("providers/generated/request_defs.zig");
+const sigv4 = @import("sigv4.zig");
 const HttpTransport = @import("http_transport.zig").HttpTransport;
 
 fn ReturnOf(comptime func: anytype) type {
@@ -47,9 +50,12 @@ pub fn withTransport(ctx: *const http.Ctx, comptime func: anytype, self: anytype
 /// transport failure is `ApiError`. `ApiError` carries no detail because Zig errors have no payload; the parsed
 /// provider envelope (message/type) travels on the capability's own response
 /// struct, which is where the other SDKs put it too.
+/// `MissingAwsCredentials` is a SigV4 provider (Bedrock) sent from a client
+/// without `Client.awsCredentials`; no request is made.
 pub const SendError = error{
     ApiError,
     MiddlewareVeto,
+    MissingAwsCredentials,
     Timeout,
 } || std.mem.Allocator.Error;
 
@@ -144,6 +150,11 @@ fn roundTrip(
     body: []const u8,
     content_type: ?[]const u8,
 ) ![]const u8 {
+    // A SigV4 provider cannot send without its signing inputs. Checked first,
+    // so a misconfigured client fails without firing middleware or sending.
+    const sig_v4 = request_defs.authScheme(args.provider) == .sig_v4;
+    const aws: ?http.AwsCredentials = if (sig_v4) (args.ctx.aws orelse return error.MissingAwsCredentials) else null;
+
     const mws = args.ctx.middlewares();
     const base = middleware.Event{
         .op = args.op,
@@ -157,12 +168,22 @@ fn roundTrip(
     var veto_reason: []const u8 = "";
     middleware.firePre(mws, base, &veto_reason) catch return error.MiddlewareVeto;
 
-    const url = try http.buildUrl(arena, args.provider, args.ctx.base_url, args.endpoint, args.api_key);
+    const url = try http.buildUrl(arena, args.provider, args.ctx.base_url, args.endpoint, args.api_key, if (aws) |a| a.region else "");
+    // The signature headers go first, so `composeHeaders` skips any contract
+    // or custom header of the same name: a signed value is never altered, and
+    // the remaining unsigned headers ride alongside (ADR-052, as in Go/Rust).
+    const extra = if (aws) |a| blk: {
+        const signed = try signedHeaders(arena, args, a, method, url, body, content_type);
+        const all = try arena.alloc(http.Header, signed.len + args.extra_headers.len);
+        @memcpy(all[0..signed.len], signed);
+        @memcpy(all[signed.len..], args.extra_headers);
+        break :blk all;
+    } else args.extra_headers;
     const headers = try http.composeHeaders(
         arena,
         args.provider,
         args.api_key,
-        args.extra_headers,
+        extra,
         content_type,
         args.ctx.customHeaders(),
     );
@@ -182,19 +203,61 @@ fn roundTrip(
 
     if (resp.status < 200 or resp.status >= 300) {
         var ev = base;
-        middleware.setEventError(&ev, .{ .api = .{
-            .provider = @tagName(args.provider),
-            .status_code = resp.status,
-            // The provider's own message travels on the capability's response
-            // struct; the event carries the stable kind, never the URL.
-            .message = "provider returned a non-2xx status",
-        } });
+        middleware.setEventError(&ev, .{
+            .api = .{
+                .provider = @tagName(args.provider),
+                .status_code = resp.status,
+                // The provider's own message travels on the capability's response
+                // struct; the event carries the stable kind, never the URL.
+                .message = "provider returned a non-2xx status",
+            },
+        });
         middleware.firePost(mws, ev);
         return error.ApiError;
     }
 
     middleware.firePost(mws, base);
     return resp.body;
+}
+
+/// Sign one request with AWS SigV4 and return the headers the signature covers
+/// that the transport does not add itself: `Authorization`, `x-amz-date`,
+/// `x-amz-content-sha256`, and `x-amz-security-token` when a session token is
+/// set. `host` is signed too, but `std.http` writes it from the same URL.
+/// `content-type` is signed when present and is added by `composeHeaders` with
+/// the same value. The access key ID is the terminal's `api_key`; the region
+/// and service come from the client and the provider's `service_name` fact.
+fn signedHeaders(
+    arena: std.mem.Allocator,
+    args: Args,
+    aws: http.AwsCredentials,
+    method: http.Method,
+    url: []const u8,
+    body: []const u8,
+    content_type: ?[]const u8,
+) ![]const http.Header {
+    const now_s = args.ctx.signing_time_s orelse std.Io.Clock.real.now(args.ctx.io).toSeconds();
+    const amz_date = try arena.create([16]u8);
+    const sig = try sigv4.signAt(arena, .{
+        .method = @tagName(method),
+        .url = url,
+        .body = body,
+        .content_type = content_type orelse "",
+        .access_key = args.api_key,
+        .secret_key = aws.secret_access_key,
+        .session_token = aws.session_token,
+        .region = aws.region,
+        .service = providers.spec(args.provider).service_name,
+        .amz_date = sigv4.amzDate(amz_date, now_s),
+    });
+
+    var list: std.ArrayList(http.Header) = .empty;
+    try list.append(arena, .{ .name = "Authorization", .value = sig.authorization });
+    try list.append(arena, .{ .name = "x-amz-date", .value = amz_date });
+    try list.append(arena, .{ .name = "x-amz-content-sha256", .value = sig.payload_hash });
+    if (aws.session_token.len > 0)
+        try list.append(arena, .{ .name = "x-amz-security-token", .value = aws.session_token });
+    return list.toOwnedSlice(arena);
 }
 
 // === Tests ===
@@ -266,6 +329,80 @@ fn testCtx(gpa: std.mem.Allocator) http.Ctx {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// The value of the header named `name` (case-insensitive), or null.
+fn headerValue(headers: []const http.Header, name: []const u8) ?[]const u8 {
+    for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    return null;
+}
+
+// The AWS docs example credentials and frozen clock every SDK's sigv4-wire
+//
+const sigv4_access_key = "AKIDEXAMPLE";
+const sigv4_secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // AWS docs example creds #gitleaks:allow
+const sigv4_frozen_clock_s: i64 = 1784332800; // 2026-07-18T00:00:00Z
 
 
 
