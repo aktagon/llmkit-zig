@@ -64,6 +64,14 @@ pub const Speech = struct {
         return s;
     }
 
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`.
+    pub fn addMiddleware(self: Speech, m: middleware.Middleware) Speech {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
     /// The voice selector (ADR-021 bare-noun replacer; request data, validated
     /// pre-flight against the provider catalogue in the full runtime, SPK-004).
     /// Wire field `voice` (OpenAI) / `voiceId` (Inworld).
@@ -361,6 +369,31 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
