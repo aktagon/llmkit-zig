@@ -42,7 +42,8 @@ pub const ChunkCallback = *const fn (chunk: []const u8) void;
 /// the golden's `"stream": true`), any other value a string.
 pub fn buildStreamBody(arena: std.mem.Allocator, cfg: request.ChatConfig) request.BuildError!json.Value {
     var body = try request.buildChatBody(arena, cfg);
-    const sd = stream_defs.streamConfig(cfg.provider) orelse return body;
+    const shape = try request.resolveWireShape(providers.spec(cfg.provider), cfg.protocol);
+    const sd = (StreamSettings.select(cfg.provider, shape) orelse return body).def;
 
     if (sd.param.len > 0)
         try json.set(arena, &body, sd.param, boolOrString(sd.param_value));
@@ -54,6 +55,22 @@ pub fn buildStreamBody(arena: std.mem.Allocator, cfg: request.ChatConfig) reques
     }
     return body;
 }
+
+/// The stream facts and the ADR-013 stream finish locator a call reads, selected
+/// by its effective chat wire shape. A shape that declares its own (OpenAI
+/// Responses: event-typed SSE, usage on `response.completed`) outranks the
+/// provider's, which describe the provider's default protocol (HANDOFF-087).
+pub const StreamSettings = struct {
+    def: stream_defs.StreamDef,
+    finish_reason_path: []const u8,
+
+    pub fn select(provider: providers.ProviderName, shape: []const u8) ?StreamSettings {
+        if (stream_defs.wireShapeStreamConfig(shape)) |sd|
+            return .{ .def = sd, .finish_reason_path = stream_defs.wireShapeStreamFinishReasonPath(shape) };
+        const sd = stream_defs.streamConfig(provider) orelse return null;
+        return .{ .def = sd, .finish_reason_path = providers.spec(provider).stream_finish_reason_path };
+    }
+};
 
 /// "true"/"false" -> a JSON boolean; anything else -> the string verbatim.
 fn boolOrString(v: []const u8) json.Value {
@@ -85,11 +102,13 @@ fn boolOrString(v: []const u8) json.Value {
 pub fn parseSseBuffer(
     arena: std.mem.Allocator,
     provider: providers.ProviderName,
+    shape: []const u8,
     sse: []const u8,
     on_chunk: ?ChunkCallback,
 ) !response.Response {
-    const sd = stream_defs.streamConfig(provider) orelse return error.UnsupportedWireShape;
-    const finish = splitFinishPath(providers.spec(provider).stream_finish_reason_path);
+    const settings = StreamSettings.select(provider, shape) orelse return error.UnsupportedWireShape;
+    const sd = settings.def;
+    const finish = splitFinishPath(settings.finish_reason_path);
 
     var content: std.ArrayList(u8) = .empty;
     var finish_reason: []const u8 = "";
@@ -193,8 +212,10 @@ pub fn streamWith(
     const model = try request.effectiveModel(providers.spec(cfg.provider), cfg.model);
     if (cfg.caching) try caching_mod.applyResourceCaching(transport, arena, ctx, cfg.provider, api_key, model, &body);
     // A provider that streams from its own endpoint declares it (Google
-    // `:streamGenerateContent?alt=sse`); the rest stream from the chat endpoint.
-    const stream_endpoint = if (stream_defs.streamConfig(cfg.provider)) |sd| sd.endpoint else "";
+    // `:streamGenerateContent?alt=sse`); the rest stream from the chat endpoint
+    // of the effective protocol (`/v1/responses` under `.protocol(.responses)`).
+    const shape = try request.resolveWireShape(providers.spec(cfg.provider), cfg.protocol);
+    const stream_endpoint = if (StreamSettings.select(cfg.provider, shape)) |s| s.def.endpoint else "";
     const endpoint = if (stream_endpoint.len > 0)
         try http.substituteModel(arena, stream_endpoint, model)
     else
@@ -210,7 +231,7 @@ pub fn streamWith(
         .post = .by_caller,
     };
     const raw = try send.postRaw(transport, arena, args, try json.stringify(arena, body), "application/json");
-    const resp = parseSseBuffer(arena, cfg.provider, raw, on_chunk) catch |err| {
+    const resp = parseSseBuffer(arena, cfg.provider, shape, raw, on_chunk) catch |err| {
         send.firePostDecodeError(args);
         return err;
     };
