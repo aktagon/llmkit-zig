@@ -1,31 +1,31 @@
 //! Transcription (speech-to-text, ADR-048 / ADR-051 Slice 3) — a mirror of
-//! rust/src/builders/transcription.rs and go/transcription.go, minus the HTTP
-//! send and the async poll/job adapter.
+//! rust/src/builders/transcription.rs and go/transcription.go, minus the
+//! bytes-upload hop.
 //!
 //! Two request encodings, dispatched on the provider's generated
 //! `request_encoding` fact (never a provider-name switch):
-//!   - `json` (AssemblyAI, ASYNC submit) — `Transcription.buildSubmitBody`
-//!     produces the flat `{audio_url}` submit body. The upload hop (bytes ->
-//!     upload_url) and the poll/wait lifecycle are the async runtime, which
-//!     needs an HTTP send terminal Zig does not yet have; they are a later
-//!     slice, so this file builds only the outbound submit bytes.
+//!   - `json` (AssemblyAI, ASYNC submit) — `Transcription.submit` POSTs the flat
+//!     `{audio_url}` body and returns a `TranscriptionHandle`; its `poll` /
+//!     `wait` run on the shared `job.zig` engine (ADR-062) through
+//!     `TranscriptionAdapter`. The lifecycle-wire `transcription-{succeeded,
+//!     failed}` goldens assert the normalized JobStatus. The bytes-upload hop
+//!     (bytes -> upload_url) is not implemented: submit takes a public URL.
 //!   - `multipart` (OpenAI, SYNC transcribe) — `Transcription.buildMultipartBody`
-//!     produces the FIRST multipart/form-data request body in the Zig SDK: a
-//!     REAL encoded body (fixed field order model / response_format / file) plus
-//!     the boundary it used, so the request-wire driver can decode it back to
-//!     the canonical descriptor the cross-SDK comparator asserts (ADR-051 OQ-3).
+//!     produces a REAL encoded multipart/form-data body (fixed field order model /
+//!     response_format / file) plus the boundary it used, so the request-wire
+//!     driver can decode it back to the canonical descriptor the cross-SDK
+//!     comparator asserts (ADR-051 OQ-3).
 //!
-//! One response seam the OpenAI sync golden asserts:
-//!   - `parseTranscriptionResponse` projects a provider REPLY to
-//!     `{text, segments}`, dispatched on the generated `wire_shape` fact.
-//!     TranscriptionOpenAI (verbose_json) is implemented; its segment offsets
-//!     are SECONDS (float) -> integer milliseconds (x1000, rounded, OAA-006).
-//!     Usage is NOT REPORTED (OAA-007 — OpenAI reports no token usage for STT).
+//! `parseTranscriptionResponse` projects a provider REPLY to `{text, segments}`,
+//! dispatched on the generated `wire_shape` fact:
+//!   - TranscriptionOpenAI (verbose_json): segment offsets are SECONDS (float) ->
+//!     integer milliseconds (x1000, rounded, OAA-006).
+//!   - TranscriptionAssemblyAI (a completed poll body): `text` + `words[]` with
+//!     integer-millisecond offsets and an optional diarized speaker.
+//! Usage is NOT REPORTED for either (OAA-007 / ADR-048 OQ-2).
 //!
 //! Everything here is backed by a caller-supplied allocator (pass an arena for a
-//! whole build/parse and free it in one shot). Runtime concerns (pre-flight
-//! validation beyond the encoding split, HTTP send, the AssemblyAI poll adapter)
-//! are later slices; this file is the wire-shaped core.
+//! whole build/parse/poll and free it in one shot).
 
 const std = @import("std");
 const http = @import("http.zig");
@@ -37,6 +37,7 @@ const providers = @import("providers/generated/providers.zig");
 const transcription_gen = @import("providers/generated/transcription_gen.zig");
 const response = @import("response.zig");
 const structs = @import("providers/generated/structs.zig");
+const job = @import("job.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -189,22 +190,16 @@ pub const Transcription = struct {
     }
 
     /// Submit audio for ASYNCHRONOUS transcription (`json` encoding, AssemblyAI)
-    /// and return the PROVIDER TRANSCRIPT ID, read from the config's declared
-    /// `submit_handle_field`. `audio_url` is a publicly fetchable audio URL.
-    ///
-    /// **Submit only.** The poll adapter that would turn this id into a finished
-    /// transcript is deferred (HANDOFF-046 slice 2): it needs the transcription
-    /// arm of the shared `job.zig` engine plus the AssemblyAI result decode, and
-    /// no cross-SDK lifecycle fixture gates that path yet. A handle type with an
-    /// unimplemented `poll` would advertise more than the SDK can do, so the bare
-    /// id is what is returned. The bytes-upload hop (`upload_endpoint`, for
-    /// callers who have audio but no public URL) is deferred with it.
+    /// and return a `TranscriptionHandle` whose id is read from the config's
+    /// declared `submit_handle_field`. `audio_url` is a publicly fetchable audio
+    /// URL (the bytes-upload hop is not implemented). Poll the handle with
+    /// `poll`, or block with `wait`. Mirrors Go/Rust `Transcription.Submit`.
     pub fn submit(
         self: Transcription,
         arena: std.mem.Allocator,
         api_key: []const u8,
         audio_url: []const u8,
-    ) ![]const u8 {
+    ) !TranscriptionHandle {
         return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, audio_url });
     }
 
@@ -219,7 +214,7 @@ pub const Transcription = struct {
         arena: std.mem.Allocator,
         api_key: []const u8,
         audio_url: []const u8,
-    ) ![]const u8 {
+    ) !TranscriptionHandle {
         const cfg = transcription_gen.transcriptionConfig(self.provider) orelse
             return error.UnsupportedTranscriptionProvider;
         const body = try self.buildSubmitBody(arena, audio_url);
@@ -236,9 +231,109 @@ pub const Transcription = struct {
         const id = json.getPath(raw, cfg.submit_handle_field) orelse
             return error.MissingTranscriptionHandle;
         if (id != .string or id.string.len == 0) return error.MissingTranscriptionHandle;
-        return id.string;
+        return .{
+            .value = .{ .id = try arena.dupe(u8, id.string), .provider = self.provider },
+            .ctx = self.ctx,
+            .api_key = api_key,
+        };
     }
 };
+
+/// Default poll cadence for `TranscriptionHandle.wait`: AssemblyAI jobs run from
+/// seconds to minutes. Mirrors Go `transcriptionPollInterval` (3s) and
+/// `transcriptionPollTimeout` (10 min).
+const poll_interval_ms: u64 = 3000;
+const poll_timeout_ms: u64 = 600000;
+
+/// A submitted asynchronous transcription job (ADR-048), polled on the shared
+/// Job engine (ADR-062). `value` is the cross-SDK `TranscriptionHandle` value
+/// (id, provider) — the part a caller persists to resume (ADR-014); `ctx`
+/// supplies the base URL override, the `io` for `wait`'s sleep, and the
+/// transport seam. A caller resuming by id passes its client's `ctx`.
+pub const TranscriptionHandle = struct {
+    value: structs.TranscriptionHandle,
+    ctx: http.Ctx,
+    api_key: []const u8 = "",
+
+    /// One poll round-trip (ADR-063 Poll): GET the transcript, classify its
+    /// status from the generated done/error facts, and decode the transcript on
+    /// success. A provider `error` status is a `JobStatus{.failed}` whose
+    /// `cause.message` carries the provider's message.
+    pub fn poll(self: TranscriptionHandle, arena: std.mem.Allocator) !job.JobStatus(TranscriptionResponse) {
+        return job.pollOnce(TranscriptionAdapter, .{ .handle = self }, arena);
+    }
+
+    /// Block until the job reaches a terminal state (ADR-063 Wait — a thin loop
+    /// over `poll`). Gives up at the deadline with `error.PollTimeout`; a
+    /// provider failure is a `JobStatus{.failed}`, not that error.
+    pub fn wait(self: TranscriptionHandle, arena: std.mem.Allocator) !job.JobStatus(TranscriptionResponse) {
+        return job.wait(TranscriptionAdapter, .{ .handle = self }, self.ctx.io, arena);
+    }
+};
+
+/// The Job-engine adapter for an async transcription (the four seams). The
+/// status-to-terminal mapping is config (`status_path` / `done_status` /
+/// `error_status`, STT-005); only the result decode is wire-shape-keyed, and it
+/// needs no second hop. Mirrors Go/Rust `transcriptionAdapter`.
+const TranscriptionAdapter = struct {
+    handle: TranscriptionHandle,
+
+    pub const Out = TranscriptionResponse;
+
+    fn tcConfig(self: TranscriptionAdapter) !transcription_gen.TranscriptionDef {
+        const cfg = transcription_gen.transcriptionConfig(self.handle.value.provider) orelse
+            return error.UnsupportedTranscriptionProvider;
+        if (!std.mem.eql(u8, cfg.interaction, "async")) return error.WrongEncoding;
+        return cfg;
+    }
+
+    pub fn config(self: TranscriptionAdapter, arena: std.mem.Allocator) !job.LifecycleConfig {
+        const cfg = try self.tcConfig();
+        // Arena-backed single-element slices: a `&.{...}` literal would dangle.
+        const done = try arena.alloc([]const u8, 1);
+        done[0] = cfg.done_status;
+        const err_values = try arena.alloc([]const u8, 1);
+        err_values[0] = cfg.error_status;
+        return .{
+            .status_path = cfg.status_path,
+            .done_values = done,
+            .error_values = err_values,
+            .error_message_path = providers.spec(self.handle.value.provider).error_message_path,
+            .poll_interval_ms = poll_interval_ms,
+            .poll_timeout_ms = poll_timeout_ms,
+            .noun = "transcription",
+        };
+    }
+
+    pub fn poll(self: TranscriptionAdapter, arena: std.mem.Allocator) !job.PollBody {
+        const cfg = try self.tcConfig();
+        const endpoint = try replaceId(arena, cfg.poll_endpoint, self.handle.value.id);
+        const resp = try send.withTransport(&self.handle.ctx, getWith, self, .{ arena, endpoint });
+        if (resp.status < 200 or resp.status >= 300) return error.ApiError;
+        return .{ .value = std.json.parseFromSliceLeaky(json.Value, arena, resp.body, .{}) catch
+            return error.InvalidTranscriptionResponse };
+    }
+
+    pub fn result(self: TranscriptionAdapter, arena: std.mem.Allocator, pb: job.PollBody) !Out {
+        return parseTranscriptionResponse(arena, self.handle.value.provider, pb.value);
+    }
+
+    fn getWith(self: TranscriptionAdapter, transport: http.Transport, arena: std.mem.Allocator, endpoint: []const u8) !http.Response {
+        // No middleware: polling reads state (BUG-036 fires on submit only).
+        return send.sendUnobserved(transport, arena, .{
+            .provider = self.handle.value.provider,
+            .ctx = &self.handle.ctx,
+            .api_key = self.handle.api_key,
+            .endpoint = endpoint,
+        });
+    }
+};
+
+/// Replace the first `{id}` in `template` with `id`.
+fn replaceId(arena: std.mem.Allocator, template: []const u8, id: []const u8) ![]const u8 {
+    const idx = std.mem.indexOf(u8, template, "{id}") orelse return template;
+    return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ template[0..idx], id, template[idx + "{id}".len ..] });
+}
 
 /// Encode the OpenAI transcription multipart body in canonical field order:
 /// model, response_format, then the file part.
@@ -270,18 +365,58 @@ fn audioExtForMime(mime: []const u8) []const u8 {
 /// Project a provider transcription REPLY into the normalized
 /// `TranscriptionResponse`, dispatched on the provider's generated `wire_shape`
 /// fact (STT-005) — never a provider-name switch. `raw` is the parsed JSON
-/// response. Slice 3 implements the OpenAI SYNC shape (TranscriptionOpenAI);
-/// the AssemblyAI poll-result decode belongs to the async runtime (a later
-/// slice) and is reported as an unsupported wire shape here. Result strings are
-/// duped into `arena`, so the response outlives the parsed body. Mirrors Rust
-/// `transcription_result_from_openai`.
+/// response: the OpenAI SYNC reply, or a completed AssemblyAI poll body. Result
+/// strings are duped into `arena`, so the response outlives the parsed body.
+/// Mirrors Rust `transcription_result`.
 pub fn parseTranscriptionResponse(arena: std.mem.Allocator, provider: ProviderName, raw: json.Value) ParseError!TranscriptionResponse {
     const cfg = transcription_gen.transcriptionConfig(provider) orelse
         return error.UnsupportedTranscriptionProvider;
 
     if (std.mem.eql(u8, cfg.wire_shape, "TranscriptionOpenAI"))
         return parseOpenAITranscription(arena, raw);
+    if (std.mem.eql(u8, cfg.wire_shape, "TranscriptionAssemblyAI"))
+        return parseAssemblyAITranscription(arena, raw);
     return error.UnsupportedTranscriptionWireShape;
+}
+
+/// Decode a completed AssemblyAI transcript: top-level `text` plus `words[]` of
+/// `{text, start, end, speaker?}` with INTEGER millisecond offsets (no
+/// conversion). Speaker is present only on diarized transcripts. Mirrors Rust
+/// `transcription_result_from_assemblyai`.
+fn parseAssemblyAITranscription(arena: std.mem.Allocator, raw: json.Value) ParseError!TranscriptionResponse {
+    const text = try arena.dupe(u8, getString(raw, "text") orelse "");
+
+    var segments: std.ArrayList(TranscriptSegment) = .empty;
+    errdefer segments.deinit(arena);
+
+    if (objGet(raw, "words")) |words| {
+        if (std.meta.activeTag(words) == .array) {
+            for (words.array.items) |w| {
+                if (std.meta.activeTag(w) != .object) continue;
+                try segments.append(arena, .{
+                    .text = try arena.dupe(u8, getString(w, "text") orelse ""),
+                    .start = intField(w, "start"),
+                    .end = intField(w, "end"),
+                    .speaker = try arena.dupe(u8, getString(w, "speaker") orelse ""),
+                });
+            }
+        }
+    }
+
+    return .{
+        .text = text,
+        .segments = try segments.toOwnedSlice(arena),
+        .usage = .{},
+    };
+}
+
+/// Read an integer field off an object Value; 0 when absent or not an integer.
+fn intField(v: json.Value, key: []const u8) i64 {
+    const got = objGet(v, key) orelse return 0;
+    return switch (got) {
+        .integer => |i| i,
+        else => 0,
+    };
 }
 
 /// Decode the OpenAI verbose_json transcript: top-level `text` plus a
@@ -524,6 +659,7 @@ fn testCtx() http.Ctx {
 
 
 
+
 /// A middleware that records every (op, phase) it is called with. Zig has no
 /// capturing closures, so the recorder's state rides on `ptr` — the same
 /// type-erasure `http.Transport` uses.
@@ -542,6 +678,123 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// An AssemblyAI handle on a mock transport (base URL left at the provider's).
+fn testHandle(gpa: std.mem.Allocator, transport: http.Transport) TranscriptionHandle {
+    return .{
+        .value = .{ .id = "9ea6f2c1-4d3b-4a17-8f0e-2c5b7d1e9a44", .provider = .assemblyai },
+        .ctx = (http.Ctx{ .gpa = gpa, .io = std.testing.io }).withTransport(transport),
+        .api_key = "aai-key",
+    };
+}
 
 
 

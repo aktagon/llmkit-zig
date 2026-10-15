@@ -59,6 +59,17 @@ First release.
   `error.Scope`.
 - The middleware post event for a chat request (prompt, stream, and each agent
   round) now carries the reply's token usage.
+- **Video jobs can be polled.** `video().submit` returns a `VideoHandle`.
+  `handle.poll` makes one request and returns the job state; `handle.wait`
+  polls every 5 seconds until the job succeeds or fails, and gives up with
+  `error.PollTimeout` after 10 minutes. On success the result holds the
+  finished video: bytes for Google Veo and Vertex Veo, a URL for the other
+  providers, and the S3 URI for Bedrock.
+- **Asynchronous transcription jobs.** `transcription().submit` returns a
+  `TranscriptionHandle`. `handle.poll` makes one request and returns the job
+  state; `handle.wait` polls until the job succeeds or fails, and gives up with
+  `error.PollTimeout` after 10 minutes. A provider failure is a `.failed` state
+  whose `cause.message` carries the provider's message.
 - **Conversation history.** `Text.history(messages)` sends earlier turns before
   the prompt. An assistant `Message` that carries the `provider_turn` from an
   earlier response is sent back exactly as the provider returned it, so
@@ -156,8 +167,5 @@ These are not supported yet:
 - **Streaming with `protocol(.responses)`** returns empty text: Responses
   stream events are not read yet.
 
-- **Video generation is submit-only.** `video().submit` returns a handle with
-  the provider's job id, but there is no poll/wait runtime, so a caller must
-  poll the provider themselves.
-
-Also not yet implemented: polling asynchronous transcription jobs.
+Also not yet implemented: the upload hop for asynchronous transcription (submit
+takes a public audio URL).
