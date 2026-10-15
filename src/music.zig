@@ -369,16 +369,22 @@ fn parseMinimaxResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime
 
 fn parseGeminiResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime: []const u8) !MusicResponse {
     var clips: std.ArrayList(AudioData) = .empty;
+    var text: std.ArrayList(u8) = .empty;
     var finish: []const u8 = "";
+    // A filtered call has no content; finishMessage is the only explanation.
+    var finish_message: ?[]const u8 = null;
 
     if (json.getPath(raw, "candidates")) |cands| if (cands == .array) {
         for (cands.array.items) |cand| {
             if (finish.len == 0) {
                 if (stringAt(cand, "finishReason")) |fr| finish = fr;
             }
+            if (finish_message == null) finish_message = stringAt(cand, "finishMessage");
             const parts = json.getPath(cand, "content.parts") orelse continue;
             if (parts != .array) continue;
             for (parts.array.items) |part| {
+                // Text parts carry the generated lyrics / song structure.
+                if (stringAt(part, "text")) |t| try text.appendSlice(arena, t);
                 const b64 = stringAt(part, "inlineData.data") orelse continue;
                 const bytes = decodeBase64(arena, b64) catch continue;
                 try clips.append(arena, .{
@@ -389,7 +395,7 @@ fn parseGeminiResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime:
         }
     };
 
-    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = finish, .finish_message = null, .raw = null };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = try text.toOwnedSlice(arena), .usage = .{}, .finish_reason = finish, .finish_message = finish_message, .raw = null };
 }
 
 /// A non-empty string at a dotted path, else null (so `orelse` chains read as
