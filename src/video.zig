@@ -13,8 +13,8 @@
 //!       * nested `{model, input:{prompt}}` (VideoQwen / DashScope).
 //!       * five-field `{model, prompt, duration, quality, aspect_ratio}` with
 //!         reference-anchored defaults (VideoPixVerse). The dynamic Ai-trace-id
-//!         header is non-deterministic and OMITTED from the request-wire golden,
-//!         so this builder does not generate it.
+//!         header is non-deterministic and OMITTED from the request-wire golden;
+//!         `submit` adds it, the body builder does not.
 //!       * `{instances:[{prompt}]}` with NO model — the model is in the submit
 //!         PATH, not the body (VideoVeo / Google, VideoVertexVeo / Vertex).
 //!       * Bedrock Nova Reel `{modelId, modelInput:{taskType, textToVideoParams:
@@ -166,11 +166,18 @@ pub const Video = struct {
         if (ctx.base_url == null and cfg.video_base_url.len > 0)
             ctx.base_url = cfg.video_base_url;
 
+        // PixVerse requires a unique per-request Ai-trace-id (an anti-cache
+        // key) on submit as well as poll. Mirrors Go/Rust `newVideoTraceID`.
+        var extra: std.ArrayList(http.Header) = .empty;
+        if (std.mem.eql(u8, cfg.wire_shape, "VideoPixVerse"))
+            try extra.append(arena, .{ .name = "Ai-trace-id", .value = try video_poll.traceId(arena, self.ctx.io) });
+
         const raw = try send.postJson(transport, arena, .{
             .provider = self.provider,
             .ctx = &ctx,
             .api_key = api_key,
             .endpoint = try http.substituteModel(arena, variant.endpoint, self.model_ orelse ""),
+            .extra_headers = extra.items,
             .op = .video_generation,
             .model = self.model_ orelse "",
         }, body);
@@ -313,6 +320,13 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
 
 
 
