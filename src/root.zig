@@ -52,6 +52,7 @@ pub const Speech = speech.Speech;
 pub const SpeechResponse = speech.SpeechResponse;
 pub const AudioData = speech.AudioData;
 pub const Transcription = transcription.Transcription;
+pub const TranscriptionHandle = transcription.TranscriptionHandle;
 pub const TranscriptionResponse = transcription.TranscriptionResponse;
 pub const TranscriptSegment = transcription.TranscriptSegment;
 pub const Video = video.Video;
@@ -80,7 +81,6 @@ pub const ProviderError = structs.ProviderError;
 pub const VideoData = structs.VideoData;
 pub const VideoResponse = structs.VideoResponse;
 pub const VideoHandle = structs.VideoHandle;
-pub const TranscriptionHandle = structs.TranscriptionHandle;
 pub const SafetySetting = client.SafetySetting;
 // === Keyless media-config accessors (ADR-036 public surface) ===
 //

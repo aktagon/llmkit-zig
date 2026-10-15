@@ -13,8 +13,8 @@
 //!     sentinel.
 //! Classification precedence is done > error > running; an unmodeled status
 //! degrades to Running (never a false terminal). The engine is provider-agnostic:
-//! the batch adapter (batch.zig) is its first user; video / transcription join in
-//! later phases.
+//! the batch adapter (batch.zig) and the transcription adapter (transcription.zig)
+//! are its users; video joins with ADR-062 slice 2.
 //!
 //! Zig has no trait objects, so the adapter is a COMPTIME duck-typed value
 //! (`comptime Adapter: type` + an `adapter: Adapter`) — the idiomatic zero-cost
@@ -54,6 +54,10 @@ pub const LifecycleConfig = struct {
     status_path: []const u8,
     done_values: []const []const u8,
     error_values: []const []const u8,
+    /// Dotted path to the provider's error message on a failed poll body
+    /// (transcription: the provider spec's `error_message_path`). Empty = none
+    /// (batch carries no message). Mirrors Go `LifecycleConfig.ErrorMessagePath`.
+    error_message_path: []const u8 = "",
     poll_interval_ms: u64 = 2000,
     poll_timeout_ms: u64 = 600000,
     noun: []const u8 = "job",
@@ -104,7 +108,7 @@ pub fn pollOnce(comptime Adapter: type, adapter: Adapter, arena: std.mem.Allocat
 
     return switch (classifyByConfig(cfg, raw)) {
         .succeeded => .{ .state = .succeeded, .result = try adapter.result(arena, pb), .raw_status = raw },
-        .failed => .{ .state = .failed, .cause = .{ .status = raw }, .raw_status = raw },
+        .failed => .{ .state = .failed, .cause = .{ .status = raw, .message = try arena.dupe(u8, pb.status(cfg.error_message_path)) }, .raw_status = raw },
         .running => .{ .state = .running, .raw_status = raw },
     };
 }
