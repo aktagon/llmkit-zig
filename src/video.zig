@@ -52,6 +52,26 @@ pub const VideoInput = struct {
 
 pub const BuildError = error{UnsupportedVideoProvider} || std.mem.Allocator.Error;
 
+/// Pre-send rejections for a last frame and reference images (BUG-089). Zig
+/// errors carry no payload; the other SDKs raise a validation error with the
+/// field and message named here, checked in this order:
+///   - `LastFrameUnsupported`: field "last_frame", "<model> does not accept a last frame".
+///   - `ReferenceImagesUnsupported`: field "reference_images", "<model> does not accept reference images".
+///   - `TooManyReferenceImages`: field "reference_images", "at most 3 reference images, got N".
+///   - `ReferenceImagesWithFrame`: field "reference_images", "cannot be combined with a first or last frame".
+///   - `LastFrameWithoutFirstFrame`: field "last_frame", "requires a first frame".
+pub const FrameError = error{
+    LastFrameUnsupported,
+    ReferenceImagesUnsupported,
+    TooManyReferenceImages,
+    ReferenceImagesWithFrame,
+    LastFrameWithoutFirstFrame,
+};
+
+/// The most asset reference images a Veo request takes (Gemini API and Vertex
+/// Veo pages, read 2026-10-15).
+pub const max_reference_images = 3;
+
 /// Fixed capacity for image-to-video seed Parts. Video chain methods take no
 /// allocator (ADR-069 ZIG-005), so Parts live in a bounded array like `Image`'s.
 /// Slice 4 conditions on a single seed frame; the capacity is headroom.
@@ -81,6 +101,10 @@ pub const Video = struct {
     text_parts_: [max_text_parts][]const u8 = undefined,
     text_part_count_: usize = 0,
     raw_: bool = false,
+    /// The final frame the video ends on (BUG-089).
+    last_frame_: ?VideoInput = null,
+    /// Asset reference images, at most 3 (BUG-089).
+    reference_images_: []const VideoInput = &.{},
 
     /// The video model id (ADR-021 bare-noun replacer). Carried in the body for
     /// the shared/qwen/pixverse shapes (as `model`) and Bedrock (as `modelId`);
@@ -111,6 +135,26 @@ pub const Video = struct {
         std.debug.assert(s.part_count_ < max_image_parts);
         s.parts_[s.part_count_] = .{ .mime = mime, .bytes = bytes };
         s.part_count_ += 1;
+        return s;
+    }
+
+    /// The final frame the video ends on (BUG-089; ADR-021 bare-noun
+    /// replacer). Send it with a first frame (`image`) on a model that takes
+    /// a last frame; otherwise `submit` rejects it before send.
+    pub fn lastFrame(self: Video, mime: []const u8, bytes: []const u8) Video {
+        var s = self;
+        s.last_frame_ = .{ .mime = mime, .bytes = bytes };
+        return s;
+    }
+
+    /// The asset reference images the video keeps, such as a person,
+    /// character or product (BUG-089). At most 3, without `image` or
+    /// `lastFrame`. Zig chain methods take no allocator (ADR-069 ZIG-005), so
+    /// the images arrive as one slice where the other SDKs append with
+    /// `AddReferenceImage`; the caller owns the slice.
+    pub fn referenceImages(self: Video, v: []const VideoInput) Video {
+        var s = self;
+        s.reference_images_ = v;
         return s;
     }
 
@@ -173,6 +217,39 @@ pub const Video = struct {
         return buildSharedBody(arena, self, prompt_text);
     }
 
+    /// Reject a last frame or reference images the model or the request cannot
+    /// carry, before send (BUG-089). Same rules and order as Go's
+    /// `validateVideoFrames`. A model missing from the config takes neither.
+    fn validateFrames(self: Video, cfg: video_gen.VideoGenDef) FrameError!void {
+        var supports_last = false;
+        var supports_refs = false;
+        for (cfg.models) |m| {
+            if (std.mem.eql(u8, m.model_id, self.model_ orelse "")) {
+                supports_last = m.supports_last_frame;
+                supports_refs = m.supports_reference_images;
+            }
+        }
+        const refs = self.reference_images_.len;
+        const last = self.last_frame_ != null;
+        if (last and !supports_last) return error.LastFrameUnsupported;
+        if (refs > 0 and !supports_refs) return error.ReferenceImagesUnsupported;
+        if (refs > max_reference_images) return error.TooManyReferenceImages;
+        // Live 2026-10-15: Veo answers 400 "Unsupported video generation
+        // request"; Vertex documents the inputs as exclusive.
+        if (refs > 0 and (self.part_count_ > 0 or last)) return error.ReferenceImagesWithFrame;
+        if (last and self.part_count_ == 0) return error.LastFrameWithoutFirstFrame;
+    }
+
+    /// The request's carried inputs (ADR-096): reference images, a seed frame
+    /// with an optional last frame, or text only.
+    fn carries(self: Video) []const []const u8 {
+        if (self.reference_images_.len > 0) return &.{image_gen.with_reference_images};
+        if (self.part_count_ > 0 and self.last_frame_ != null)
+            return &.{ image_gen.with_seed_frame, image_gen.with_last_frame };
+        if (self.part_count_ > 0) return &.{image_gen.with_seed_frame};
+        return &.{image_gen.text_only};
+    }
+
     /// Submit a video-generation job and return a `VideoHandle`. The submit
     /// hop answers with the provider's job id (read at the config's
     /// `submit_handle_field`); poll the handle with `poll`, or block with
@@ -199,7 +276,8 @@ pub const Video = struct {
             return error.UnsupportedVideoProvider;
         // ADR-096: a seed frame selects the WithSeedFrame submit request;
         // a config with no such variant cannot send it.
-        const variant = try request_variant.select(cfg.variants, self.part_count_, image_gen.with_seed_frame);
+        try self.validateFrames(cfg);
+        const variant = try request_variant.select(cfg.variants, self.carries());
         const body = try self.buildSubmitBody(arena, prompt);
 
         // Several providers serve video off a DIFFERENT host than chat (MiniMax,
@@ -325,13 +403,41 @@ fn buildVeoBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) BuildE
         try json.set(arena, &img, "mimeType", .{ .string = if (seed.mime.len == 0) "image/png" else seed.mime });
         try json.set(arena, &instance, "image", img);
     }
+    // Last frame and asset reference images (BUG-089): same
+    // {bytesBase64Encoded, mimeType} wrapper. Reference images force an
+    // 8-second video, sent as the NUMBER 8 on both APIs (live 2026-10-15: the
+    // Gemini API rejects the string "8" its docs show).
+    if (vid.last_frame_) |last| try json.set(arena, &instance, "lastFrame", try veoImage(arena, last));
+    var parameters: ?json.Value = null;
+    if (vid.reference_images_.len > 0) {
+        var refs = json.array(arena);
+        for (vid.reference_images_) |ref| {
+            var item = json.object();
+            try json.set(arena, &item, "image", try veoImage(arena, ref));
+            try json.set(arena, &item, "referenceType", .{ .string = "asset" });
+            try refs.array.append(item);
+        }
+        try json.set(arena, &instance, "referenceImages", refs);
+        var p = json.object();
+        try json.set(arena, &p, "durationSeconds", .{ .integer = 8 });
+        parameters = p;
+    }
 
     var instances = json.array(arena);
     try instances.array.append(instance);
 
     var body = json.object();
     try json.set(arena, &body, "instances", instances);
+    if (parameters) |p| try json.set(arena, &body, "parameters", p);
     return body;
+}
+
+/// A Veo image object: raw base64 bytes and the MIME type (default image/png).
+fn veoImage(arena: std.mem.Allocator, img: VideoInput) BuildError!json.Value {
+    var out = json.object();
+    try json.set(arena, &out, "bytesBase64Encoded", .{ .string = try base64Encode(arena, img.bytes) });
+    try json.set(arena, &out, "mimeType", .{ .string = if (img.mime.len == 0) "image/png" else img.mime });
+    return out;
 }
 
 /// The Bedrock Nova Reel submit body: the model is carried in the body
@@ -374,6 +480,40 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
