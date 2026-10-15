@@ -6,15 +6,13 @@
 //!     the request variant the parts select (ADR-096): InlineParts -> Google
 //!     generateContent `contents`/`parts`; JSONGenerationsOpenAI -> the OpenAI
 //!     flat generations body; JSONInlineRefs -> the xAI Grok body with
-//!     data-URL reference images; JSONPredict -> the Vertex Imagen
-//!     instances/parameters body; JSONGenerations -> Recraft's flat body. Never
+//!     data-URL reference images; JSONGenerations -> Recraft's flat body. Never
 //!     a provider-name switch. The image INPUT is RAW bytes; the builder
 //!     base64-encodes it. The MultipartForm variant is the OpenAI edit request:
 //!     `Image.buildEditMultipart` encodes it as multipart/form-data (BUG-097).
 //!   - `parseImageResponse` projects a provider REPLY to the normalized
 //!     `{images, usage, finish_reason}` dispatched on the generated
-//!     `response_shape` fact (GoogleParts / DataArrayB64Json / VertexPredictions,
-//!     BUG-024) — again config, never a name switch.
+//!     `response_shape` fact (GoogleParts / DataArrayB64Json, BUG-024) — again config, never a name switch.
 //!
 //! Both are backed by a caller-supplied allocator (pass an arena for a whole
 //! build/parse and free it in one shot). Runtime concerns (validation, HTTP
@@ -210,8 +208,6 @@ pub const Image = struct {
             return buildOpenAIGenBody(arena, self, prompt);
         if (eq(u8, shape, image_gen.json_inline_refs))
             return buildXAIBody(arena, self, parts, prompt);
-        if (eq(u8, shape, image_gen.json_predict))
-            return buildVertexBody(arena, self, prompt);
         if (eq(u8, shape, image_gen.json_generations))
             return buildRecraftGenBody(arena, self, prompt);
         return error.UnsupportedImageProvider;
@@ -344,9 +340,9 @@ fn extFromMime(mime: []const u8) []const u8 {
 ///
 /// The variant names an image-specific path when the provider has one (OpenAI
 /// `/v1/images/generations` and `/v1/images/edits`, Recraft, xAI). It is EMPTY
-/// for Google and Vertex, whose image requests use the provider's main endpoint
-/// template, which is where the model id lives for those shapes
-/// (`/v1beta/models/{model}:generateContent`, `/{model}:predict`). Reading the
+/// for Google, whose image requests use the provider's main endpoint template,
+/// which is where the model id lives for that shape
+/// (`/v1beta/models/{model}:generateContent`). Reading the
 /// fallback from the provider spec keeps this config-driven: no arm of this
 /// function knows a provider by name.
 fn imageEndpoint(
@@ -452,27 +448,6 @@ fn buildXAIBody(arena: std.mem.Allocator, img: Image, parts: []const ImageInput,
     return body;
 }
 
-/// The Vertex Imagen `:predict` body: `{instances: [{prompt}], parameters:
-/// {sampleCount, aspectRatio?}}`. `sampleCount` defaults to 1. The Imagen
-/// generate models take text only (BUG-101): the config has no
-/// WithReferenceImages variant, so image parts never reach here. Mirrors Go
-/// `buildVertexBody`.
-fn buildVertexBody(arena: std.mem.Allocator, img: Image, prompt: []const u8) BuildError!json.Value {
-    var instance = json.object();
-    try json.set(arena, &instance, "prompt", .{ .string = prompt });
-    var instances = json.array(arena);
-    try instances.array.append(instance);
-
-    var parameters = json.object();
-    try json.set(arena, &parameters, "sampleCount", .{ .integer = img.count_ orelse 1 });
-    if (img.aspect_ratio_) |r| try json.set(arena, &parameters, "aspectRatio", .{ .string = r });
-
-    var body = json.object();
-    try json.set(arena, &body, "instances", instances);
-    try json.set(arena, &body, "parameters", parameters);
-    return body;
-}
-
 /// The Recraft generations body (flat JSON): `{model, prompt, response_format:
 /// "b64_json", size?, n?}`. `response_format` is forced to `b64_json` because
 /// Recraft defaults to URL delivery — forcing it keeps the response shape uniform
@@ -499,8 +474,6 @@ pub fn parseImageResponse(arena: std.mem.Allocator, provider: ProviderName, raw:
 
     if (std.mem.eql(u8, cfg.response_shape, "DataArrayB64Json"))
         return parseDataArrayB64Json(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
-    if (std.mem.eql(u8, cfg.response_shape, "VertexPredictions"))
-        return parseVertexPredictions(arena, raw);
     return parseGoogleParts(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
 }
 
@@ -533,35 +506,6 @@ fn parseDataArrayB64Json(arena: std.mem.Allocator, raw: json.Value, input_path: 
         .images = try images.toOwnedSlice(arena),
         .text = try std.mem.join(arena, "\n", revised.items),
         .usage = .{ .input = intAt(raw, input_path), .output = intAt(raw, output_path), .reasoning = response.optInt(raw, reasoning_path) },
-    };
-}
-
-/// Decode the Vertex Imagen `:predict` shape: `{predictions:[{bytesBase64Encoded,
-/// mimeType}]}`. Vertex reports no token counts at all, so no dimension is reported. Mirrors
-/// Rust `parse_vertex_image_response`.
-fn parseVertexPredictions(arena: std.mem.Allocator, raw: json.Value) ParseError!ImageResponse {
-    var images: std.ArrayList(ImageData) = .empty;
-    var finish_reason: []const u8 = "";
-    if (json.getPath(raw, "predictions")) |preds| {
-        if (std.meta.activeTag(preds) == .array) {
-            for (preds.array.items) |entry| {
-                if (finish_reason.len == 0) {
-                    if (getString(entry, "raiFilteredReason")) |rai| {
-                        if (rai.len > 0) finish_reason = rai;
-                    }
-                }
-                const b64 = getString(entry, "bytesBase64Encoded") orelse continue;
-                if (b64.len == 0) continue;
-                var mime: []const u8 = getString(entry, "mimeType") orelse "";
-                if (mime.len == 0) mime = "image/png";
-                const decoded = base64Decode(arena, b64) catch continue;
-                try images.append(arena, .{ .mime_type = mime, .bytes = decoded });
-            }
-        }
-    }
-    return .{
-        .images = try images.toOwnedSlice(arena),
-        .finish_reason = optString(finish_reason),
     };
 }
 
@@ -655,41 +599,6 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

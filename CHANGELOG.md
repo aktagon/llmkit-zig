@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   total. Telemetry now exports a usage attribute when the value is *reported*,
   zero included, instead of when it is greater than zero.
 
+### Removed
+
+- **Vertex image generation removed.** Google shut down the Imagen endpoints.
+  Image generation on Vertex now fails with `error.UnsupportedImageProvider`
+  before any request is sent. Vertex music and video are unchanged, and the
+  Vertex default model is now `lyria-002`.
+
 ### Added
 
 - `batch_slot_missing` and `batch_slot_error`: the finish reasons of a batch
