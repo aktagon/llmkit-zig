@@ -80,6 +80,11 @@ pub const Args = struct {
     /// reply's token usage, as in Go and Rust (telemetry exports it). Failure
     /// posts (transport error, non-2xx) always fire here.
     post: enum { on_reply, by_caller } = .on_reply,
+    /// Who fires the pre event. A chat send that creates a Google cache first
+    /// sets `.by_caller` and calls `firePre` before that hop, so a veto stops
+    /// the billable create and the cache events nest inside this send's pair,
+    /// as in Go and Rust.
+    pre: enum { here, by_caller } = .here,
 };
 
 /// The pre-phase event this send fires: op, provider, and model.
@@ -102,8 +107,11 @@ pub fn firePostUsage(args: Args, input: ?i64, output: ?i64) void {
 
 /// Fire the pre phase (vetoable) for an operation the caller sends itself as
 /// several unobserved hops under ONE event, such as the transcription upload
-/// and submit. Pair it with `firePostOutcome`.
-pub fn firePre(args: Args) error{MiddlewareVeto}!void {
+/// and submit, or for a `.pre = .by_caller` send. Pair it with
+/// `firePostOutcome` or `closeFailed`. A SigV4 provider without its signing
+/// inputs fails first, without firing, as `roundTrip` does.
+pub fn firePre(args: Args) error{ MiddlewareVeto, MissingAwsCredentials }!void {
+    _ = try awsCredentials(args.provider, args.ctx);
     var reason: []const u8 = "";
     middleware.firePre(args.ctx.middlewares(), baseEvent(args), &reason) catch return error.MiddlewareVeto;
 }
@@ -114,6 +122,27 @@ pub fn firePostOutcome(args: Args, failure: ?middleware.CallError) void {
     var ev = baseEvent(args);
     if (failure) |f| middleware.setEventError(&ev, f);
     middleware.firePost(args.ctx.middlewares(), ev);
+}
+
+/// The post-event error for a hop that failed after `firePre`.
+pub fn hopFailure(provider: providers.ProviderName, err: anyerror) middleware.CallError {
+    return switch (err) {
+        error.Timeout => .{ .transport = "timeout" },
+        error.ApiError => .{ .api = .{
+            .provider = @tagName(provider),
+            .status_code = 0,
+            .message = "provider returned a non-2xx status",
+        } },
+        error.MiddlewareVeto => .{ .middleware_veto = "a middleware vetoed a request this call needs" },
+        else => .{ .decoding = "could not read the provider reply" },
+    };
+}
+
+/// Fire the post for a `.pre = .by_caller` send whose pre-send hop failed, and
+/// return that error: `catch |err| return send.closeFailed(args, err)`.
+pub fn closeFailed(args: Args, err: anytype) @TypeOf(err) {
+    firePostOutcome(args, hopFailure(args.provider, err));
+    return err;
 }
 
 /// Fire the post for a `.by_caller` send whose 2xx reply could not be decoded.
@@ -208,8 +237,10 @@ fn roundTrip(
 
     // Pre-phase veto happens BEFORE the URL is assembled, so a vetoed call
     // never even materializes a key-bearing URL in memory.
-    var veto_reason: []const u8 = "";
-    middleware.firePre(mws, base, &veto_reason) catch return error.MiddlewareVeto;
+    if (args.pre == .here) {
+        var veto_reason: []const u8 = "";
+        middleware.firePre(mws, base, &veto_reason) catch return error.MiddlewareVeto;
+    }
 
     const req = try prepare(arena, .{
         .provider = args.provider,

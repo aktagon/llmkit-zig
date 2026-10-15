@@ -249,16 +249,7 @@ pub const Transcription = struct {
         };
         try send.firePre(args);
         const id = self.uploadAndSubmit(transport, arena, api_key, cfg, audio) catch |err| {
-            send.firePostOutcome(args, switch (err) {
-                error.Timeout => .{ .transport = "timeout" },
-                error.ApiError => .{ .api = .{
-                    .provider = @tagName(self.provider),
-                    .status_code = 0,
-                    .message = "provider returned a non-2xx status",
-                } },
-                else => .{ .decoding = "could not read the provider reply" },
-            });
-            return err;
+            return send.closeFailed(args, err);
         };
         send.firePostOutcome(args, null);
         return .{

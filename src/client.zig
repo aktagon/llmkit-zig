@@ -520,7 +520,6 @@ pub const Text = struct {
         const cfg = self.chatConfig(text_prompt);
         const model_id = try request.effectiveModel(providers.spec(self.provider), cfg.model);
         var body = try request.buildChatBody(arena, cfg);
-        if (cfg.caching) try caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body);
         // The EFFECTIVE wire shape — the same one buildChatBody resolved — so a
         // `.protocol(.responses)` reply is decoded with the Responses envelope
         // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
@@ -534,7 +533,11 @@ pub const Text = struct {
             .op = .llm_request,
             .model = model_id,
             .post = .by_caller,
+            .pre = .by_caller,
         };
+        try send.firePre(args);
+        if (cfg.caching) caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body) catch |err|
+            return send.closeFailed(args, err);
         const reply = try send.postJsonWithText(transport, arena, args, body);
         var resp = decodeChatReply(arena, self.provider, shape, reply) catch |err| {
             send.firePostDecodeError(args);

@@ -295,10 +295,6 @@ pub const Agent = struct {
             var body = try request.buildChatBody(arena, cfg);
             if (self.tool_count_ > 0)
                 try applyToolDefs(arena, &body, self.provider, self.tools_[0..self.tool_count_]);
-            // Each round's body carries the system prompt, so each round
-            // creates its cache, as in Go/Rust.
-            if (self.caching_) try caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body);
-
             const args = send.Args{
                 .provider = self.provider,
                 .ctx = &self.ctx,
@@ -307,7 +303,13 @@ pub const Agent = struct {
                 .op = .llm_request,
                 .model = model_id,
                 .post = .by_caller,
+                .pre = .by_caller,
             };
+            try send.firePre(args);
+            // Each round's body carries the system prompt, so each round
+            // creates its cache, as in Go/Rust.
+            if (self.caching_) caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body) catch |err|
+                return send.closeFailed(args, err);
             const reply = try send.postJsonWithText(transport, arena, args, body);
             var resp = (response.decodeResponse(arena, self.provider, shape, reply.value) catch |err| {
                 send.firePostDecodeError(args);
