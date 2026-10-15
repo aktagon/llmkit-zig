@@ -25,6 +25,7 @@ const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
+const caching_mod = @import("caching.zig");
 const providers = @import("providers/generated/providers.zig");
 const stream_defs = @import("providers/generated/stream.zig");
 
@@ -163,8 +164,9 @@ pub fn streamWith(
     api_key: []const u8,
     on_chunk: ?ChunkCallback,
 ) !response.Response {
-    const body = try buildStreamBody(arena, cfg);
+    var body = try buildStreamBody(arena, cfg);
     const model = try request.effectiveModel(providers.spec(cfg.provider), cfg.model);
+    if (cfg.caching) try caching_mod.applyResourceCaching(transport, arena, ctx, cfg.provider, api_key, model, &body);
     // A provider that streams from its own endpoint declares it (Google
     // `:streamGenerateContent?alt=sse`); the rest stream from the chat endpoint.
     const stream_endpoint = if (stream_defs.streamConfig(cfg.provider)) |sd| sd.endpoint else "";

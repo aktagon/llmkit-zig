@@ -53,6 +53,10 @@ First release.
   conversation, usage sums every round, and each tool call fires `tool_call`
   middleware events that can veto it.
 - `Text.text(s)` adds a text part to the user turn.
+- **Google cache resources.** With `caching()` on, a Google request first
+  creates a `cachedContents` resource holding the system prompt, then sends the
+  request with a reference to it. Each creation fires `cache_create` middleware
+  events.
 - `batch_slot_missing` and `batch_slot_error`: the finish reasons of a batch
   slot with no result, and of a failed slot the provider gave no reason for.
   Compare against them instead of typing the strings.
@@ -142,7 +146,6 @@ These are not supported yet:
   Attempting to stream an event-typed provider returns
   `error.UnsupportedWireShape` rather than silently returning empty text.
 
-Also not yet implemented: Google's `ResourceCaching` pre-hop (explicit
-`cache_control` caching works), the live `/models` catalogue send (the
-compiled-in catalogue and request assembly work), and polling asynchronous
-transcription jobs.
+Also not yet implemented: the live `/models` catalogue send (the compiled-in
+catalogue and request assembly work), and polling asynchronous transcription
+jobs.
