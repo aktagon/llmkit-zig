@@ -187,6 +187,7 @@ pub const Text = struct {
     text_parts_: [max_text_parts][]const u8 = undefined,
     text_part_count_: usize = 0,
     history_: []const Message = &.{},
+    raw_: bool = false,
 
     pub fn model(self: Text, m: []const u8) Text {
         var s = self;
@@ -362,6 +363,25 @@ pub const Text = struct {
         return s;
     }
 
+    /// Attach an observation + veto hook to this builder only (ADR-020). The
+    /// builder starts with the client's hooks; this appends to its own copy, so
+    /// a sibling builder from the same client does not see it. The hook's `ptr`
+    /// is borrowed and must outlive the terminal. Mirrors Rust `add_middleware`.
+    pub fn addMiddleware(self: Text, m: middleware.Middleware) Text {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
+    /// Opt in to `Response.raw` (ADR-014): `prompt` sets it to the parsed
+    /// provider reply body, and `batch` marks the handle so each result carries
+    /// its own body. Null without this call. Mirrors Rust `raw()`.
+    pub fn raw(self: Text) Text {
+        var s = self;
+        s.raw_ = true;
+        return s;
+    }
+
     /// The typed request config this builder describes. Constructed inline at
     /// each terminal (not returned from a helper): `media` slices into `self`'s
     /// inline `media_` array, so it is only valid while THIS `self` is alive —
@@ -478,6 +498,7 @@ pub const Text = struct {
         // the reply BYTES. decodeResponse only ever sees the parsed tree, which
         // has no memory of them (ADR-069 ZIG-002), so the capture happens here.
         resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);
+        if (self.raw_) resp.raw = reply.value;
         return resp;
     }
 
@@ -530,7 +551,7 @@ pub const Text = struct {
         prompts: []const []const u8,
     ) !batch_mod.BatchHandle {
         const built = try batch_mod.buildBatchBody(arena, self.provider, self.chatConfig(""), prompts);
-        return batch_mod.submitWith(transport, arena, &self.ctx, self.provider, api_key, built);
+        return batch_mod.submitWith(transport, arena, &self.ctx, self.provider, api_key, built, self.raw_);
     }
 };
 
@@ -575,6 +596,94 @@ const TestHook = struct {
         return .{ .ptr = self, .call_fn = call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

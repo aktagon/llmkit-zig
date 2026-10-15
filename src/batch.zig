@@ -126,6 +126,7 @@ pub fn parseBatchResults(
     provider: providers.ProviderName,
     sources: []const []const u8,
     count: ?usize,
+    raw: bool,
 ) ![]Response {
     const bd = batch_defs.batchConfig(provider) orelse return error.UnsupportedWireShape;
 
@@ -135,12 +136,12 @@ pub fn parseBatchResults(
 
     for (sources) |source| {
         var lines = std.mem.splitScalar(u8, source, '\n');
-        while (lines.next()) |raw| {
-            const line = std.mem.trim(u8, raw, " \r\t");
+        while (lines.next()) |text| {
+            const line = std.mem.trim(u8, text, " \r\t");
             if (line.len == 0) continue;
 
             const parsed = std.json.parseFromSliceLeaky(json.Value, arena, line, .{}) catch continue;
-            const slot = try parseBatchResultLine(arena, provider, bd, parsed);
+            const slot = try parseBatchResultLine(arena, provider, bd, parsed, raw);
 
             var index: ?usize = if (bd.result_key_path.len > 0) batchRequestIndex(json.getPath(parsed, bd.result_key_path)) else null;
             if (index != null and count != null and index.? >= count.?) index = null;
@@ -175,14 +176,20 @@ const BatchSlot = struct { resp: Response, succeeded: bool };
 
 /// One result line -> its slot: the decoded chat body when the line carries
 /// the provider's success signal and a decodable body, otherwise a failed
-/// Response carrying the provider's reason and message.
-fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderName, bd: batch_defs.BatchDef, line: json.Value) !BatchSlot {
+/// Response carrying the provider's reason and message. With `raw` (ADR-014),
+/// a succeeded Response carries its unwrapped body and a failed one the whole
+/// line, as in Rust `parse_batch_result_line`.
+fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderName, bd: batch_defs.BatchDef, line: json.Value, raw: bool) !BatchSlot {
     if (try succeededLine(arena, bd, line)) {
         const body = if (bd.result_body_path.len > 0) json.getPath(line, bd.result_body_path) else line;
         if (body) |b| if (b == .object) {
             // Batch is Chat-Completions-only (ADR-055 declares no batch Responses
             // protocol), so the wire shape is explicitly empty, never derived.
-            if (response.decodeResponse(arena, provider, "", b)) |d| return .{ .resp = d.response, .succeeded = true } else |_| {}
+            if (response.decodeResponse(arena, provider, "", b)) |d| {
+                var resp = d.response;
+                if (raw) resp.raw = b;
+                return .{ .resp = resp, .succeeded = true };
+            } else |_| {}
         };
     }
 
@@ -193,7 +200,7 @@ fn parseBatchResultLine(arena: std.mem.Allocator, provider: providers.ProviderNa
         .finish_reason = reason orelse batch_defs.batch_slot_error,
         .finish_message = message,
         .usage = .{},
-        .raw = null,
+        .raw = if (raw) line else null,
         .provider_turn = null,
     }, .succeeded = false };
 }
@@ -284,7 +291,8 @@ fn batchRequestIndex(id: ?json.Value) ?usize {
 /// `value` is the cross-SDK `BatchHandle` value (id, provider, raw) — the part
 /// a caller persists to resume. The generated struct cannot carry methods, so
 /// this runtime handle embeds it beside the runtime-only `ctx` and `api_key`.
-/// `value.raw` is always false until the `.raw()` opt-in lands (BUG-073).
+/// `value.raw` comes from `Text.raw()`; a caller resuming by id sets it
+/// directly. When true, each result carries its body in `Response.raw`.
 pub const BatchHandle = struct {
     value: structs.BatchHandle,
     ctx: http.Ctx,
@@ -325,6 +333,7 @@ pub fn submitWith(
     provider: providers.ProviderName,
     api_key: []const u8,
     built: BatchBuildResult,
+    raw: bool,
 ) !BatchHandle {
     const lc = (batch_defs.batchConfig(provider) orelse return error.UnsupportedWireShape).lifecycle orelse
         return error.UnsupportedWireShape;
@@ -336,7 +345,7 @@ pub fn submitWith(
             .value = try std.mem.join(arena, ",", built.beta_headers),
         });
 
-    const raw = try send.postJson(transport, arena, .{
+    const created = try send.postJson(transport, arena, .{
         .provider = provider,
         .ctx = ctx,
         .api_key = api_key,
@@ -345,11 +354,11 @@ pub fn submitWith(
         .op = .batch_submit,
     }, built.payload);
 
-    const id = json.getPath(raw, lc.response_id_path) orelse return error.ApiError;
+    const id = json.getPath(created, lc.response_id_path) orelse return error.ApiError;
     if (id != .string) return error.ApiError;
 
     return .{
-        .value = .{ .id = try arena.dupe(u8, id.string), .provider = provider, .raw = false },
+        .value = .{ .id = try arena.dupe(u8, id.string), .provider = provider, .raw = raw },
         .ctx = ctx.*,
         .api_key = api_key,
     };
@@ -412,7 +421,7 @@ const BatchAdapter = struct {
 
         const bd = batch_defs.batchConfig(self.handle.value.provider).?;
         const count = batchRequestCount(pb.value, bd.request_count_paths);
-        return parseBatchResults(arena, self.handle.value.provider, sources.items, count);
+        return parseBatchResults(arena, self.handle.value.provider, sources.items, count, self.handle.value.raw);
     }
 
     fn get(self: BatchAdapter, arena: std.mem.Allocator, url: []const u8) !http.Response {
