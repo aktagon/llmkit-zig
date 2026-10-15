@@ -43,7 +43,46 @@ pub const AudioData = structs.AudioData;
 /// for speech), and an optional finish reason.
 pub const SpeechResponse = structs.SpeechResponse;
 
-pub const BuildError = error{UnsupportedSpeechProvider} || std.mem.Allocator.Error;
+/// Pre-send rejections for speakers, lines and style (BUG-091). Zig error
+/// sets carry no payload (ADR-076 §3), so each names the KIND where the other
+/// SDKs return `ValidationError{Field, Message}` with the same rule:
+///   - `UndeclaredSpeaker`: field "lines", "<name> is not a declared speaker".
+///   - `WrongSpeakerCount`: field "speakers", "exactly 2 speakers are required, got N".
+///   - `TextWithLines`: field "text", "must be empty when lines are set".
+///   - `VoiceWithSpeakers`: field "voice", "cannot be set together with speakers".
+///   - `StyleWithSpeakers`: field "style", "cannot be set together with speakers; ...".
+///   - `LinesRequired`: field "lines", "required when speakers are set".
+///   - `SpeakersUnsupported`: field "speakers", "<model> does not support multiple speakers".
+///   - `StyleUnsupported`: field "style", "<model> does not support a speech style".
+///   - `UnknownSpeechModel`: field "model", raised only when a speaker or
+///     style rule needs the model's facts.
+pub const ValidationError = error{
+    UndeclaredSpeaker,
+    WrongSpeakerCount,
+    TextWithLines,
+    VoiceWithSpeakers,
+    StyleWithSpeakers,
+    LinesRequired,
+    SpeakersUnsupported,
+    StyleUnsupported,
+    UnknownSpeechModel,
+};
+
+pub const BuildError = error{UnsupportedSpeechProvider} || ValidationError || std.mem.Allocator.Error;
+
+/// One named speaker of a multi-speaker request and its voice (BUG-091).
+pub const SpeechSpeaker = struct {
+    name: []const u8,
+    voice: []const u8,
+};
+
+/// One line of a multi-speaker request: the declared speaker who says it, an
+/// optional delivery style, and the text (BUG-091).
+pub const SpeechLine = struct {
+    speaker: []const u8,
+    style: ?[]const u8 = null,
+    text: []const u8,
+};
 pub const ParseError = error{ UnsupportedSpeechProvider, InvalidSpeechResponse } || std.mem.Allocator.Error;
 
 /// The public Speech builder. Immutable value type: each chain method returns a
@@ -54,6 +93,9 @@ pub const Speech = struct {
     ctx: http.Ctx,
     model_: ?[]const u8 = null,
     voice_: ?[]const u8 = null,
+    style_: ?[]const u8 = null,
+    speakers_: []const SpeechSpeaker = &.{},
+    lines_: []const SpeechLine = &.{},
 
     /// The speech-generation model id (ADR-021 bare-noun replacer). Required by
     /// the full runtime; carried in the body for both wire shapes (OpenAI
@@ -72,13 +114,78 @@ pub const Speech = struct {
         return s;
     }
 
-    /// The voice selector (ADR-021 bare-noun replacer; request data, validated
-    /// pre-flight against the provider catalogue in the full runtime, SPK-004).
-    /// Wire field `voice` (OpenAI) / `voiceId` (Inworld).
+    /// The voice selector (ADR-021 bare-noun replacer; request data, SPK-004).
+    /// A free-form voice id, sent as given: there is no catalogue (owner,
+    /// 2026-10-15). Wire field `voice` (OpenAI) / `voiceId` (Inworld).
     pub fn voice(self: Speech, v: []const u8) Speech {
         var s = self;
         s.voice_ = v;
         return s;
+    }
+
+    /// The delivery style of a single-voice request, such as "cheerful"
+    /// (BUG-091; ADR-021 bare-noun replacer). A model that does not take a
+    /// style rejects it before send.
+    pub fn style(self: Speech, v: []const u8) Speech {
+        var s = self;
+        s.style_ = v;
+        return s;
+    }
+
+    /// The named speakers and their voices of a multi-speaker request
+    /// (BUG-091). Declare exactly 2, and set no voice with them. A slice
+    /// replacer: chain methods take no allocator (ADR-069 ZIG-005), so Zig
+    /// takes the speakers and lines as request fields where the other SDKs
+    /// append one per call (owner-approved BUG-091 sketch).
+    pub fn speakers(self: Speech, v: []const SpeechSpeaker) Speech {
+        var s = self;
+        s.speakers_ = v;
+        return s;
+    }
+
+    /// The lines of a multi-speaker request, spoken in slice order (BUG-091).
+    /// Each names a declared speaker; when lines are set, the text passed to
+    /// the terminal must be empty.
+    pub fn lines(self: Speech, v: []const SpeechLine) Speech {
+        var s = self;
+        s.lines_ = v;
+        return s;
+    }
+
+    /// The pre-send speaker, line and style rules (BUG-091); the same rules,
+    /// in the same order, as every other SDK.
+    fn validate(self: Speech, cfg: speech_gen.SpeechGenDef, text: []const u8) ValidationError!void {
+        const voice_set = if (self.voice_) |v| v.len > 0 else false;
+        const style_set = if (self.style_) |v| v.len > 0 else false;
+        if (self.lines_.len > 0 and text.len > 0) return error.TextWithLines;
+        if (self.speakers_.len > 0) {
+            if (voice_set) return error.VoiceWithSpeakers;
+            if (style_set) return error.StyleWithSpeakers;
+            if (self.lines_.len == 0) return error.LinesRequired;
+        }
+        for (self.lines_) |line| {
+            var declared = false;
+            for (self.speakers_) |sp| {
+                if (std.mem.eql(u8, sp.name, line.speaker)) declared = true;
+            }
+            if (!declared) return error.UndeclaredSpeaker;
+        }
+        var line_styled = false;
+        for (self.lines_) |line| {
+            if (line.style) |st| {
+                if (st.len > 0) line_styled = true;
+            }
+        }
+        if (self.speakers_.len == 0 and !style_set and !line_styled) return;
+        const model_id = self.model_ orelse return error.UnknownSpeechModel;
+        const def = for (cfg.models) |m| {
+            if (std.mem.eql(u8, m.model_id, model_id)) break m;
+        } else return error.UnknownSpeechModel;
+        if (self.speakers_.len > 0) {
+            if (def.max_speakers == 0) return error.SpeakersUnsupported;
+            if (@as(i64, @intCast(self.speakers_.len)) != def.max_speakers) return error.WrongSpeakerCount;
+        }
+        if ((style_set or line_styled) and !def.supports_speech_style) return error.StyleUnsupported;
     }
 
     /// Build the text-to-speech request body as a dynamic JSON Value backed by
@@ -88,9 +195,12 @@ pub const Speech = struct {
     pub fn buildSpeechBody(self: Speech, arena: std.mem.Allocator, text: []const u8) BuildError!json.Value {
         const cfg = speech_gen.speechGenConfig(self.provider) orelse
             return error.UnsupportedSpeechProvider;
+        try self.validate(cfg, text);
 
         if (std.mem.eql(u8, cfg.wire_shape, "SpeechOpenAI"))
             return buildOpenAISpeechBody(arena, self, text);
+        if (std.mem.eql(u8, cfg.wire_shape, "SpeechGemini"))
+            return buildGeminiSpeechBody(arena, self, text);
         return buildInworldSpeechBody(arena, self, text);
     }
 
@@ -173,6 +283,82 @@ fn buildOpenAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8)
     try json.set(arena, &body, "input", .{ .string = text });
     if (sp.voice_) |v| try json.set(arena, &body, "voice", .{ .string = v });
     try json.set(arena, &body, "response_format", .{ .string = "mp3" });
+    // A style is sent as `instructions` (BUG-091), which gpt-4o-mini-tts accepts.
+    if (sp.style_) |st| if (st.len > 0) try json.set(arena, &body, "instructions", .{ .string = st });
+    return body;
+}
+
+/// The Gemini TTS request body on the Interactions API (BUG-091): `{model,
+/// input:[{type:user_input, content:[{type:text, text}]}],
+/// response_format:{type:audio}, generation_config:{speech_config:[{voice}]},
+/// store:false}`. `store` is always false: the Interactions API keeps requests
+/// by default. One user turn, one single-speaker voice. Mirrors Rust
+/// `build_gemini_speech_body`.
+fn buildGeminiSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8) BuildError!json.Value {
+    var body = json.object();
+    if (sp.model_) |m| try json.set(arena, &body, "model", .{ .string = m });
+
+    var content = json.array(arena);
+    if (sp.speakers_.len == 0) {
+        var text_item = json.object();
+        try json.set(arena, &text_item, "type", .{ .string = "text" });
+        try json.set(arena, &text_item, "text", .{ .string = text });
+        if (sp.style_) |st| if (st.len > 0) {
+            var meta = json.object();
+            try json.set(arena, &meta, "type", .{ .string = "speech_metadata" });
+            try json.set(arena, &meta, "style", .{ .string = st });
+            var annotations = json.array(arena);
+            try annotations.array.append(meta);
+            try json.set(arena, &text_item, "annotations", annotations);
+        };
+        try content.array.append(text_item);
+    } else {
+        for (sp.lines_) |line| {
+            var meta = json.object();
+            try json.set(arena, &meta, "type", .{ .string = "speech_metadata" });
+            try json.set(arena, &meta, "speaker", .{ .string = line.speaker });
+            if (line.style) |st| if (st.len > 0) try json.set(arena, &meta, "style", .{ .string = st });
+            var annotations = json.array(arena);
+            try annotations.array.append(meta);
+            var item = json.object();
+            try json.set(arena, &item, "type", .{ .string = "text" });
+            try json.set(arena, &item, "text", .{ .string = line.text });
+            try json.set(arena, &item, "annotations", annotations);
+            try content.array.append(item);
+        }
+    }
+    var turn = json.object();
+    try json.set(arena, &turn, "type", .{ .string = "user_input" });
+    try json.set(arena, &turn, "content", content);
+    var input = json.array(arena);
+    try input.array.append(turn);
+    try json.set(arena, &body, "input", input);
+
+    var response_format = json.object();
+    try json.set(arena, &response_format, "type", .{ .string = "audio" });
+    try json.set(arena, &body, "response_format", response_format);
+
+    var speech_config: json.Value = undefined;
+    if (sp.speakers_.len == 0) {
+        var speaker = json.object();
+        if (sp.voice_) |v| try json.set(arena, &speaker, "voice", .{ .string = v });
+        speech_config = json.array(arena);
+        try speech_config.array.append(speaker);
+    } else {
+        var list = json.array(arena);
+        for (sp.speakers_) |s| {
+            var entry = json.object();
+            try json.set(arena, &entry, "speaker", .{ .string = s.name });
+            try json.set(arena, &entry, "voice", .{ .string = s.voice });
+            try list.array.append(entry);
+        }
+        speech_config = json.object();
+        try json.set(arena, &speech_config, "speakers", list);
+    }
+    var generation_config = json.object();
+    try json.set(arena, &generation_config, "speech_config", speech_config);
+    try json.set(arena, &body, "generation_config", generation_config);
+    try json.set(arena, &body, "store", .{ .bool = false });
     return body;
 }
 
@@ -197,6 +383,9 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, bod
     if (std.mem.eql(u8, cfg.audio_response_encoding, "rawBody")) {
         return .{ .audio = .{ .mime_type = mime, .bytes = try arena.dupe(u8, body) }, .usage = .{}, .finish_reason = null };
     }
+    if (std.mem.eql(u8, cfg.audio_response_encoding, "base64InteractionSteps")) {
+        return parseInteractionSteps(arena, mime, body);
+    }
 
     // base64Envelope: {"audioContent": "<base64>", "usage": {...}}.
     const parsed = json.parse(arena, body) catch return error.InvalidSpeechResponse;
@@ -205,6 +394,43 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, bod
     const b64 = getString(parsed.value, "audioContent") orelse return error.InvalidSpeechResponse;
     if (b64.len == 0) return error.InvalidSpeechResponse;
     const decoded = base64Decode(arena, b64) catch return error.InvalidSpeechResponse;
+    return .{ .audio = .{ .mime_type = mime, .bytes = decoded }, .usage = .{}, .finish_reason = null };
+}
+
+/// Decode a Gemini TTS Interactions API reply (BUG-091). Google's documented
+/// path is
+/// `[.steps[] | select(.type=="model_output") | .content[] | select(.type=="audio")] | last | .data`:
+/// the LAST audio item across the model_output steps wins. Its `mime_type` is
+/// used when present, else `fallback_mime`. No audio item, or invalid base64,
+/// is a decoding error (HANDOFF-036 A5).
+fn parseInteractionSteps(arena: std.mem.Allocator, fallback_mime: []const u8, body: []const u8) ParseError!SpeechResponse {
+    const parsed = json.parse(arena, body) catch return error.InvalidSpeechResponse;
+    defer parsed.deinit();
+
+    var last: ?json.Value = null;
+    if (std.meta.activeTag(parsed.value) == .object) {
+        if (parsed.value.object.get("steps")) |steps| if (std.meta.activeTag(steps) == .array) {
+            for (steps.array.items) |step| {
+                const step_type = getString(step, "type") orelse continue;
+                if (!std.mem.eql(u8, step_type, "model_output")) continue;
+                const content = step.object.get("content") orelse continue;
+                if (std.meta.activeTag(content) != .array) continue;
+                for (content.array.items) |item| {
+                    const item_type = getString(item, "type") orelse continue;
+                    if (std.mem.eql(u8, item_type, "audio")) last = item;
+                }
+            }
+        };
+    }
+    const item = last orelse return error.InvalidSpeechResponse;
+    const b64 = getString(item, "data") orelse return error.InvalidSpeechResponse;
+    if (b64.len == 0) return error.InvalidSpeechResponse;
+    const decoded = base64Decode(arena, b64) catch return error.InvalidSpeechResponse;
+    // parsed.deinit frees the reply tree, so the item's MIME is copied out.
+    const mime = if (getString(item, "mime_type")) |m|
+        (if (m.len > 0) try arena.dupe(u8, m) else fallback_mime)
+    else
+        fallback_mime;
     return .{ .audio = .{ .mime_type = mime, .bytes = decoded }, .usage = .{}, .finish_reason = null };
 }
 
@@ -369,6 +595,109 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -33,6 +33,7 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
 const request_variant = @import("request_variant.zig");
+const image_gen = @import("providers/generated/image_gen.zig");
 const middleware = @import("middleware.zig");
 const video_poll = @import("video_poll.zig");
 
@@ -101,9 +102,10 @@ pub const Video = struct {
 
     /// Append an image-to-video seed-frame Part (BUG-010). `mime` is the IANA
     /// media type; `bytes` is RAW (the builder base64-encodes it into the
-    /// seed data URL). Accepted only by the shared-shape image-to-video model
-    /// (grok-imagine-video); ignored by every other submit shape (ADR-021
-    /// `Add*`-class appender, kept as `image` for call-site uniformity).
+    /// seed data URL, or the raw base64 Veo first frame, BUG-089). Carried by
+    /// grok-imagine-video and the Veo 3.1 models; ignored by every other
+    /// submit shape (ADR-021 `Add*`-class appender, kept as `image` for
+    /// call-site uniformity).
     pub fn image(self: Video, mime: []const u8, bytes: []const u8) Video {
         var s = self;
         std.debug.assert(s.part_count_ < max_image_parts);
@@ -164,7 +166,7 @@ pub const Video = struct {
         if (std.mem.eql(u8, shape, "VideoPixVerse"))
             return buildPixVerseBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoVeo") or std.mem.eql(u8, shape, "VideoVertexVeo"))
-            return buildVeoBody(arena, prompt_text);
+            return buildVeoBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoBedrock"))
             return buildBedrockBody(arena, self, prompt_text);
         // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu.
@@ -195,9 +197,9 @@ pub const Video = struct {
     ) !VideoHandle {
         const cfg = video_gen.videoGenConfig(self.provider) orelse
             return error.UnsupportedVideoProvider;
-        // ADR-096: a seed frame selects the WithReferenceImages submit request;
+        // ADR-096: a seed frame selects the WithSeedFrame submit request;
         // a config with no such variant cannot send it.
-        const variant = try request_variant.select(cfg.variants, self.part_count_);
+        const variant = try request_variant.select(cfg.variants, self.part_count_, image_gen.with_seed_frame);
         const body = try self.buildSubmitBody(arena, prompt);
 
         // Several providers serve video off a DIFFERENT host than chat (MiniMax,
@@ -309,10 +311,20 @@ fn buildPixVerseBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) B
 
 /// The Veo submit body (Google Veo + Vertex Veo): the prompt nests under
 /// `instances[]` and there is NO model field — the model is in the submit PATH
-/// (:predictLongRunning), not the body.
-fn buildVeoBody(arena: std.mem.Allocator, prompt: []const u8) BuildError!json.Value {
+/// (:predictLongRunning), not the body. A first frame (BUG-089) rides at
+/// `instances[0].image` as `{bytesBase64Encoded, mimeType}` — raw base64, no
+/// data: prefix — per the Vertex Veo reference (read 2026-10-15); the Gemini
+/// API shape is not yet live-verified. Absent on the text-to-video hot path.
+fn buildVeoBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) BuildError!json.Value {
     var instance = json.object();
     try json.set(arena, &instance, "prompt", .{ .string = prompt });
+    if (vid.part_count_ > 0) {
+        const seed = vid.parts_[0];
+        var img = json.object();
+        try json.set(arena, &img, "bytesBase64Encoded", .{ .string = try base64Encode(arena, seed.bytes) });
+        try json.set(arena, &img, "mimeType", .{ .string = if (seed.mime.len == 0) "image/png" else seed.mime });
+        try json.set(arena, &instance, "image", img);
+    }
 
     var instances = json.array(arena);
     try instances.array.append(instance);
