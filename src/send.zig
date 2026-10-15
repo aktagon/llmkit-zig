@@ -100,6 +100,22 @@ pub fn firePostUsage(args: Args, input: ?i64, output: ?i64) void {
     middleware.firePost(args.ctx.middlewares(), ev);
 }
 
+/// Fire the pre phase (vetoable) for an operation the caller sends itself as
+/// several unobserved hops under ONE event, such as the transcription upload
+/// and submit. Pair it with `firePostOutcome`.
+pub fn firePre(args: Args) error{MiddlewareVeto}!void {
+    var reason: []const u8 = "";
+    middleware.firePre(args.ctx.middlewares(), baseEvent(args), &reason) catch return error.MiddlewareVeto;
+}
+
+/// Fire the post phase for an operation started with `firePre`. A null
+/// `failure` reports success.
+pub fn firePostOutcome(args: Args, failure: ?middleware.CallError) void {
+    var ev = baseEvent(args);
+    if (failure) |f| middleware.setEventError(&ev, f);
+    middleware.firePost(args.ctx.middlewares(), ev);
+}
+
 /// Fire the post for a `.by_caller` send whose 2xx reply could not be decoded.
 pub fn firePostDecodeError(args: Args) void {
     var ev = baseEvent(args);
