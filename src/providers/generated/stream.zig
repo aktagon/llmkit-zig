@@ -1,6 +1,7 @@
 // Code generated — DO NOT EDIT.
 
 
+const std = @import("std");
 const ProviderName = @import("providers.zig").ProviderName;
 
 pub const StreamDef = struct {
@@ -428,4 +429,30 @@ pub fn streamConfig(provider: ProviderName) ?StreamDef {
         },
         else => null,
     };
+}
+
+/// The streaming config a chat wire shape declares for every provider that
+/// selects it, or null when the provider's `streamConfig` holds.
+pub fn wireShapeStreamConfig(chat_wire_shape: []const u8) ?StreamDef {
+    if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) return .{
+        .endpoint = "",
+        .param = "stream",
+        .param_value = "true",
+        .delta_text_path = "delta",
+        .done_signal = "",
+        .uses_event_types = true,
+        .content_event = "response.output_text.delta",
+        .done_event = "",
+        .usage_event = "response.completed",
+        .usage_input_path = "response.usage.input_tokens",
+        .usage_output_path = "response.usage.output_tokens",
+        .usage_opt_in = false,
+    };
+    return null;
+}
+
+/// The ADR-013 stream finish locator read with `wireShapeStreamConfig`.
+pub fn wireShapeStreamFinishReasonPath(chat_wire_shape: []const u8) []const u8 {
+    if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) return "response.completed:response.status";
+    return "";
 }

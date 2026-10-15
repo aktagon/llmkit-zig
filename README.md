@@ -117,7 +117,7 @@ fn printChunk(chunk: []const u8) void {
 }
 ```
 
-Streaming works for OpenAI-compatible providers over Chat Completions, for Anthropic, and for Google.
+Streaming works for OpenAI-compatible providers over Chat Completions, for OpenAI with `protocol(.responses)`, for Anthropic, and for Google.
 
 ### Agent: tool loop
 
@@ -422,7 +422,7 @@ The export is synchronous and fail-open: a collector error never fails the call.
 
 ## Not yet supported
 
-- **Streaming** for the Bedrock chat shape, and with `protocol(.responses)`. OpenAI-compatible providers, Anthropic and Google stream.
+- **Bedrock streaming** is not supported. No SDK streams Bedrock today.
 
 ## Mirror
 
