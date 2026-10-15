@@ -419,8 +419,7 @@ const BatchAdapter = struct {
     pub fn poll(self: BatchAdapter, arena: std.mem.Allocator) !job.PollBody {
         const lc = self.lifecycle();
         // Status GET: `<base><create_endpoint>/<id>` (no dedicated polling_endpoint).
-        const url = try std.fmt.allocPrint(arena, "{s}{s}/{s}", .{ self.base(), lc.create_endpoint, self.handle.value.id });
-        const resp = try self.get(arena, url);
+        const resp = try self.get(arena, try std.fmt.allocPrint(arena, "{s}/{s}", .{ lc.create_endpoint, self.handle.value.id }));
         return .{ .value = try std.json.parseFromSliceLeaky(json.Value, arena, resp.body, .{}) };
     }
 
@@ -431,14 +430,12 @@ const BatchAdapter = struct {
         // status body names (OpenAI). A file whose id is absent is skipped.
         var sources: std.ArrayList([]const u8) = .empty;
         if (lc.result_endpoint.len > 0) {
-            const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.result_endpoint, self.handle.value.id) });
-            try sources.append(arena, (try self.get(arena, url)).body);
+            try sources.append(arena, (try self.get(arena, try replaceId(arena, lc.result_endpoint, self.handle.value.id))).body);
         }
         for ([_][]const u8{ lc.result_file_id_path, lc.error_file_id_path }) |id_path| {
             const fid = pb.status(id_path);
             if (fid.len == 0) continue;
-            const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base(), try replaceId(arena, lc.file_content_endpoint, fid) });
-            try sources.append(arena, (try self.get(arena, url)).body);
+            try sources.append(arena, (try self.get(arena, try replaceId(arena, lc.file_content_endpoint, fid))).body);
         }
         if (sources.items.len == 0) return error.NoBatchResultSource;
 
@@ -447,13 +444,19 @@ const BatchAdapter = struct {
         return parseBatchResults(arena, self.handle.value.provider, sources.items, count, self.handle.value.raw);
     }
 
-    fn get(self: BatchAdapter, arena: std.mem.Allocator, url: []const u8) !http.Response {
-        return send.withTransport(&self.handle.ctx, getWith, self, .{ arena, url });
+    /// GET one lifecycle endpoint on the provider's (or the client's) base.
+    fn get(self: BatchAdapter, arena: std.mem.Allocator, endpoint: []const u8) !http.Response {
+        return send.withTransport(&self.handle.ctx, getWith, self, .{ arena, endpoint });
     }
 
-    fn getWith(self: BatchAdapter, transport: http.Transport, arena: std.mem.Allocator, url: []const u8) !http.Response {
-        const headers = try http.buildAuthHeaders(arena, self.handle.value.provider, self.handle.api_key);
-        return transport.send(arena, .{ .method = .GET, .url = url, .headers = headers });
+    fn getWith(self: BatchAdapter, transport: http.Transport, arena: std.mem.Allocator, endpoint: []const u8) !http.Response {
+        // No middleware: polling reads state (BUG-036 fires on submit only).
+        return send.sendUnobserved(transport, arena, .{
+            .provider = self.handle.value.provider,
+            .ctx = &self.handle.ctx,
+            .api_key = self.handle.api_key,
+            .endpoint = endpoint,
+        });
     }
 };
 

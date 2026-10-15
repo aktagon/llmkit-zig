@@ -167,7 +167,7 @@ pub const Client = struct {
 
     /// Enter the VideoGeneration builder (single-turn text-to-video, with an
     /// optional image-to-video seed frame). `submit` returns a `VideoHandle`;
-    /// the poll/wait runtime is deferred to ADR-062 slice 2 (see CHANGELOG).
+    /// `handle.poll` makes one request, `handle.wait` polls until it finishes.
     pub fn video(self: Client) video_mod.Video {
         return .{ .provider = self.provider, .ctx = self.ctx };
     }

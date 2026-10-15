@@ -13,8 +13,8 @@
 //!     sentinel.
 //! Classification precedence is done > error > running; an unmodeled status
 //! degrades to Running (never a false terminal). The engine is provider-agnostic:
-//! the batch adapter (batch.zig) is its first user; video / transcription join in
-//! later phases.
+//! its users are the batch (batch.zig), transcription (transcription.zig), and
+//! video (video_poll.zig) adapters.
 //!
 //! Zig has no trait objects, so the adapter is a COMPTIME duck-typed value
 //! (`comptime Adapter: type` + an `adapter: Adapter`) — the idiomatic zero-cost
@@ -54,6 +54,10 @@ pub const LifecycleConfig = struct {
     status_path: []const u8,
     done_values: []const []const u8,
     error_values: []const []const u8,
+    /// Dotted path to the provider's error message on a failed poll body
+    /// (transcription: the provider spec's `error_message_path`). Empty = none
+    /// (batch carries no message). Mirrors Go `LifecycleConfig.ErrorMessagePath`.
+    error_message_path: []const u8 = "",
     poll_interval_ms: u64 = 2000,
     poll_timeout_ms: u64 = 600000,
     noun: []const u8 = "job",
@@ -92,19 +96,47 @@ pub fn classifyByConfig(cfg: LifecycleConfig, status: []const u8) Classification
     return .running;
 }
 
+/// What a classify seam returns: the state, the raw status recorded on the
+/// `JobStatus`, and (when Failed) the provider's message. Slices may point into
+/// the poll body; `pollOnce` dupes them into the arena.
+pub const Verdict = struct {
+    state: Classification,
+    raw_status: []const u8,
+    message: []const u8 = "",
+};
+
+/// The config-backed default classify: the status at `status_path` against the
+/// done/error sets, plus the message at `error_message_path` on failure.
+fn classifyBody(cfg: LifecycleConfig, pb: PollBody) Verdict {
+    const raw = pb.status(cfg.status_path);
+    const c = classifyByConfig(cfg, raw);
+    return .{
+        .state = c,
+        .raw_status = raw,
+        .message = if (c == .failed) pb.status(cfg.error_message_path) else "",
+    };
+}
+
 /// The ADR-063 `Poll` primitive: one round-trip. Poll the job, classify the
 /// status, and — only when Succeeded — fetch the result (a possible second hop).
 /// Returns the normalized `JobStatus`. `Adapter` must expose `pub const Out`,
 /// `config(arena) LifecycleConfig` (arena-backed so its status-value slices
 /// outlive the call), `poll(arena) !PollBody`, and `result(arena, PollBody) !Out`.
+/// An adapter whose status is not one string at one path (video: numeric codes,
+/// an LRO `done` flag) also declares `classify(arena, PollBody) !Verdict`, the
+/// Go/Rust `classify` seam; otherwise `classifyBody` applies.
 pub fn pollOnce(comptime Adapter: type, adapter: Adapter, arena: std.mem.Allocator) !JobStatus(Adapter.Out) {
     const cfg = try adapter.config(arena);
     const pb = try adapter.poll(arena);
-    const raw = try arena.dupe(u8, pb.status(cfg.status_path));
+    const v: Verdict = if (@hasDecl(Adapter, "classify"))
+        try adapter.classify(arena, pb)
+    else
+        classifyBody(cfg, pb);
+    const raw = try arena.dupe(u8, v.raw_status);
 
-    return switch (classifyByConfig(cfg, raw)) {
+    return switch (v.state) {
         .succeeded => .{ .state = .succeeded, .result = try adapter.result(arena, pb), .raw_status = raw },
-        .failed => .{ .state = .failed, .cause = .{ .status = raw }, .raw_status = raw },
+        .failed => .{ .state = .failed, .cause = .{ .status = raw, .message = try arena.dupe(u8, v.message) }, .raw_status = raw },
         .running => .{ .state = .running, .raw_status = raw },
     };
 }

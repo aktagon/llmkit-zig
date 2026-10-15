@@ -185,8 +185,7 @@ fn roundTrip(
 ) ![]const u8 {
     // A SigV4 provider cannot send without its signing inputs. Checked first,
     // so a misconfigured client fails without firing middleware or sending.
-    const sig_v4 = request_defs.authScheme(args.provider) == .sig_v4;
-    const aws: ?http.AwsCredentials = if (sig_v4) (args.ctx.aws orelse return error.MissingAwsCredentials) else null;
+    _ = try awsCredentials(args.provider, args.ctx);
 
     const mws = args.ctx.middlewares();
     const base = baseEvent(args);
@@ -196,32 +195,17 @@ fn roundTrip(
     var veto_reason: []const u8 = "";
     middleware.firePre(mws, base, &veto_reason) catch return error.MiddlewareVeto;
 
-    const url = try http.buildUrl(arena, args.provider, args.ctx.base_url, args.endpoint, args.api_key, if (aws) |a| a.region else "");
-    // The signature headers go first, so `composeHeaders` skips any contract
-    // or custom header of the same name: a signed value is never altered, and
-    // the remaining unsigned headers ride alongside (ADR-052, as in Go/Rust).
-    const extra = if (aws) |a| blk: {
-        const signed = try signedHeaders(arena, args, a, method, url, body, content_type);
-        const all = try arena.alloc(http.Header, signed.len + args.extra_headers.len);
-        @memcpy(all[0..signed.len], signed);
-        @memcpy(all[signed.len..], args.extra_headers);
-        break :blk all;
-    } else args.extra_headers;
-    const headers = try http.composeHeaders(
-        arena,
-        args.provider,
-        args.api_key,
-        extra,
-        content_type,
-        args.ctx.customHeaders(),
-    );
-
-    const resp = transport.send(arena, .{
+    const req = try prepare(arena, .{
+        .provider = args.provider,
+        .ctx = args.ctx,
+        .api_key = args.api_key,
+        .endpoint = args.endpoint,
+        .extra_headers = args.extra_headers,
         .method = method,
-        .url = url,
-        .headers = headers,
         .body = body,
-    }) catch |err| {
+        .content_type = content_type,
+    });
+    const resp = transport.send(arena, req) catch |err| {
         const timed_out = err == error.Timeout;
         var ev = base;
         middleware.setEventError(&ev, .{ .transport = if (timed_out) "timeout" else "transport error" });
@@ -248,6 +232,62 @@ fn roundTrip(
     return resp.body;
 }
 
+/// One outbound request, before it is sent: where it goes and what it carries.
+pub const Hop = struct {
+    provider: providers.ProviderName,
+    /// Borrowed for the call, as in `Args`.
+    ctx: *const http.Ctx,
+    api_key: []const u8,
+    /// Overrides the client's base URL for this request: a capability with its
+    /// own host (video), or an absolute URL with an empty `endpoint`.
+    base_url: ?[]const u8 = null,
+    endpoint: []const u8,
+    extra_headers: []const http.Header = &.{},
+    method: http.Method = .GET,
+    body: []const u8 = "",
+    content_type: ?[]const u8 = null,
+};
+
+/// Send one request that fires no middleware: the poll, result and download
+/// hops of an async job (BUG-036: middleware fires on submit only). It returns
+/// the response whatever its status, for the caller to classify. URL assembly,
+/// SigV4 signing and header composition are `prepare`, the same code
+/// `roundTrip` uses, so a poll is signed and carries the client's custom
+/// headers exactly as its submit does.
+pub fn sendUnobserved(transport: http.Transport, arena: std.mem.Allocator, hop: Hop) !http.Response {
+    return transport.send(arena, try prepare(arena, hop));
+}
+
+/// The signing inputs a SigV4 provider needs, or null for any other provider.
+fn awsCredentials(provider: providers.ProviderName, ctx: *const http.Ctx) error{MissingAwsCredentials}!?http.AwsCredentials {
+    if (request_defs.authScheme(provider) != .sig_v4) return null;
+    return ctx.aws orelse error.MissingAwsCredentials;
+}
+
+/// Build the request for one hop: the URL (base override, `{region}`, query
+/// key), the SigV4 signature when the provider's auth scheme asks for it, and
+/// the composed headers.
+fn prepare(arena: std.mem.Allocator, hop: Hop) !http.Request {
+    const aws = try awsCredentials(hop.provider, hop.ctx);
+    const url = try http.buildUrl(arena, hop.provider, hop.base_url orelse hop.ctx.base_url, hop.endpoint, hop.api_key, if (aws) |a| a.region else "");
+    // The signature headers go first, so `composeHeaders` skips any contract
+    // or custom header of the same name: a signed value is never altered, and
+    // the remaining unsigned headers ride alongside (ADR-052, as in Go/Rust).
+    const extra = if (aws) |a| blk: {
+        const signed = try signedHeaders(arena, hop, a, url);
+        const all = try arena.alloc(http.Header, signed.len + hop.extra_headers.len);
+        @memcpy(all[0..signed.len], signed);
+        @memcpy(all[signed.len..], hop.extra_headers);
+        break :blk all;
+    } else hop.extra_headers;
+    return .{
+        .method = hop.method,
+        .url = url,
+        .headers = try http.composeHeaders(arena, hop.provider, hop.api_key, extra, hop.content_type, hop.ctx.customHeaders()),
+        .body = hop.body,
+    };
+}
+
 /// Sign one request with AWS SigV4 and return the headers the signature covers
 /// that the transport does not add itself: `Authorization`, `x-amz-date`,
 /// `x-amz-content-sha256`, and `x-amz-security-token` when a session token is
@@ -257,25 +297,22 @@ fn roundTrip(
 /// and service come from the client and the provider's `service_name` fact.
 fn signedHeaders(
     arena: std.mem.Allocator,
-    args: Args,
+    hop: Hop,
     aws: http.AwsCredentials,
-    method: http.Method,
     url: []const u8,
-    body: []const u8,
-    content_type: ?[]const u8,
 ) ![]const http.Header {
-    const now_s = args.ctx.signing_time_s orelse std.Io.Clock.real.now(args.ctx.io).toSeconds();
+    const now_s = hop.ctx.signing_time_s orelse std.Io.Clock.real.now(hop.ctx.io).toSeconds();
     const amz_date = try arena.create([16]u8);
     const sig = try sigv4.signAt(arena, .{
-        .method = @tagName(method),
+        .method = @tagName(hop.method),
         .url = url,
-        .body = body,
-        .content_type = content_type orelse "",
-        .access_key = args.api_key,
+        .body = hop.body,
+        .content_type = hop.content_type orelse "",
+        .access_key = hop.api_key,
         .secret_key = aws.secret_access_key,
         .session_token = aws.session_token,
         .region = aws.region,
-        .service = providers.spec(args.provider).service_name,
+        .service = providers.spec(hop.provider).service_name,
         .amz_date = sigv4.amzDate(amz_date, now_s),
     });
 

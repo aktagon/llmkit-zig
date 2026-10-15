@@ -1,6 +1,6 @@
 //! Video generation (text-to-video, ADR-034 Slice 4) — a mirror of the
-//! submit-body construction in rust/src/video.rs and go/video.go, minus the
-//! async runtime.
+//! submit side of rust/src/video.rs and go/video.go. The poll/wait half is
+//! `video_poll.zig` (`VideoHandle`).
 //!
 //! One pure seam the request-wire goldens assert:
 //!   - `Video.buildSubmitBody` produces the SUBMIT request body per the
@@ -13,8 +13,8 @@
 //!       * nested `{model, input:{prompt}}` (VideoQwen / DashScope).
 //!       * five-field `{model, prompt, duration, quality, aspect_ratio}` with
 //!         reference-anchored defaults (VideoPixVerse). The dynamic Ai-trace-id
-//!         header is non-deterministic and OMITTED from the request-wire golden,
-//!         so this builder does not generate it.
+//!         header is non-deterministic and OMITTED from the request-wire golden;
+//!         `submit` adds it, the body builder does not.
 //!       * `{instances:[{prompt}]}` with NO model — the model is in the submit
 //!         PATH, not the body (VideoVeo / Google, VideoVertexVeo / Vertex).
 //!       * Bedrock Nova Reel `{modelId, modelInput:{taskType, textToVideoParams:
@@ -23,10 +23,8 @@
 //!         This is the submit BODY only: SigV4 signing is a separate concern
 //!         (the sigv4-wire suite), not done here.
 //!
-//! `submit` sends the body and returns a `VideoHandle`. The poll/wait loop, the
-//! two-hop file retrieve and the delivery download are a later slice (ADR-062
-//! slice 2). Bodies are backed by a caller-supplied allocator (pass an arena;
-//! free it in one shot).
+//! `Video.submit` POSTs that body and returns a `VideoHandle`; the handle's
+//! `poll` / `wait` live in `video_poll.zig`, on the shared Job engine.
 
 const std = @import("std");
 const http = @import("http.zig");
@@ -36,11 +34,10 @@ const providers = @import("providers/generated/providers.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
 const request_variant = @import("request_variant.zig");
 const middleware = @import("middleware.zig");
-const structs = @import("providers/generated/structs.zig");
+const video_poll = @import("video_poll.zig");
 
-/// The submitted job: provider id, provider, model, and the `.raw()` opt-in
-/// (ADR-014). A caller resuming a job persists these fields.
-pub const VideoHandle = structs.VideoHandle;
+/// The submitted job (ADR-014 value + the poll/wait runtime in `video_poll.zig`).
+pub const VideoHandle = video_poll.VideoHandle;
 
 pub const ProviderName = providers.ProviderName;
 
@@ -174,15 +171,10 @@ pub const Video = struct {
         return buildSharedBody(arena, self, prompt_text);
     }
 
-    /// Submit a video-generation job and return its `VideoHandle`: the provider
-    /// job id, the provider, the model, and the `.raw()` opt-in, the cross-SDK
-    /// handle value (ADR-014). Mirrors Rust `submit_video`.
-    ///
-    /// Video generation is asynchronous everywhere: the submit hop answers with a
-    /// handle, and the finished mp4 arrives only after polling. This terminal is
-    /// the submit hop ONLY; there is no poll/wait here yet (ADR-062 slice 2).
-    /// Callers who need the finished asset today poll the provider's own
-    /// `poll_endpoint` with `handle.id`.
+    /// Submit a video-generation job and return a `VideoHandle`. The submit
+    /// hop answers with the provider's job id (read at the config's
+    /// `submit_handle_field`); poll the handle with `poll`, or block with
+    /// `wait`, to get the finished video. Mirrors Go/Rust `Video.Submit`.
     pub fn submit(
         self: Video,
         arena: std.mem.Allocator,
@@ -216,20 +208,33 @@ pub const Video = struct {
         if (ctx.base_url == null and cfg.video_base_url.len > 0)
             ctx.base_url = cfg.video_base_url;
 
+        // PixVerse requires a unique per-request Ai-trace-id (an anti-cache
+        // key) on submit as well as poll. Mirrors Go/Rust `newVideoTraceID`.
+        var extra: std.ArrayList(http.Header) = .empty;
+        if (std.mem.eql(u8, cfg.wire_shape, "VideoPixVerse"))
+            try extra.append(arena, .{ .name = "Ai-trace-id", .value = try video_poll.traceId(arena, self.ctx.io) });
+
         const reply = try send.postJson(transport, arena, .{
             .provider = self.provider,
             .ctx = &ctx,
             .api_key = api_key,
             .endpoint = try http.substituteModel(arena, variant.endpoint, self.model_ orelse ""),
+            .extra_headers = extra.items,
             .op = .video_generation,
             .model = self.model_ orelse "",
         }, body);
 
+        const id = handleIdAt(arena, reply, cfg.submit_handle_field) orelse return error.MissingVideoHandle;
         return .{
-            .id = handleIdAt(arena, reply, cfg.submit_handle_field) orelse return error.MissingVideoHandle,
-            .provider = self.provider,
-            .raw = self.raw_,
-            .model = self.model_ orelse "",
+            .value = .{
+                .id = try arena.dupe(u8, id),
+                .provider = self.provider,
+                .raw = self.raw_,
+                // Vertex Veo polls a model-templated path, so the handle keeps it.
+                .model = self.model_ orelse "",
+            },
+            .ctx = self.ctx,
+            .api_key = api_key,
         };
     }
 };
@@ -357,6 +362,18 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

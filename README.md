@@ -211,16 +211,20 @@ for (resp.audio) |clip| {
 }
 ```
 
-### Video: submit a job
+### Video: submit and wait
 
 ```zig
 const handle = try client.video()
     .model("veo-3.0-generate-001")
     .submit(arena, key, "A paper boat drifting down a stream");
-std.debug.print("submitted: {s}\n", .{handle.id});
+
+const st = try handle.wait(arena);
+if (st.result) |resp| {
+    for (resp.videos) |v| std.debug.print("{s}, {d} bytes, url={s}\n", .{ v.mime_type, v.bytes.len, v.url });
+}
 ```
 
-`submit` returns a `VideoHandle` whose `id` is the provider's job id. Polling a video job is not yet supported; see [Not yet supported](#not-yet-supported).
+`submit` returns a handle; `handle.value.id` is the provider's job id, which you can store and poll later. `poll` makes one request and reports the job state; `wait` polls every 5 seconds until the job finishes, and returns `error.PollTimeout` after 10 minutes. A failed job has state `.failed`, with the provider's message in `st.cause.?.message`. Depending on the provider, a finished video carries its bytes or a URL.
 
 ### Speech: text-to-speech
 
@@ -240,6 +244,20 @@ const resp = try client.transcription()
     .model("whisper-1")
     .transcribe(arena, key, "audio/mpeg", audio);
 std.debug.print("{s}\n", .{resp.text});
+```
+
+Asynchronous providers (AssemblyAI) take a public audio URL and return a handle. `poll` makes one request and reports the job state; `wait` polls until the job finishes.
+
+```zig
+const handle = try client.transcription()
+    .submit(arena, key, "https://storage.example.com/meeting.mp3");
+
+const st = try handle.wait(arena);
+switch (st.state) {
+    .succeeded => std.debug.print("{s}\n", .{st.result.?.text}),
+    .failed => std.debug.print("failed: {s}\n", .{st.cause.?.message}),
+    .running => unreachable, // wait returns only a finished job
+}
 ```
 
 ### Upload
@@ -405,8 +423,6 @@ The export is synchronous and fail-open: a collector error never fails the call.
 ## Not yet supported
 
 - **Streaming** for the Bedrock chat shape, and with `protocol(.responses)`. OpenAI-compatible providers, Anthropic and Google stream.
-- **Video polling:** `Video.submit` returns a handle with the job id; fetching the result is not available.
-- **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
 
 ## Mirror
 
