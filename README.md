@@ -106,7 +106,7 @@ fn printChunk(chunk: []const u8) void {
 }
 ```
 
-Streaming works for OpenAI-compatible providers over Chat Completions, and for Google.
+Streaming works for OpenAI-compatible providers over Chat Completions, for Anthropic, and for Google.
 
 ### Agent: tool loop
 
@@ -369,7 +369,7 @@ The `ptr` is yours: point it at whatever state the hook needs. It must outlive e
 ## Not yet supported
 
 - **AWS Bedrock:** requests are not signed, so Bedrock calls cannot be sent.
-- **Streaming** for the Anthropic and Bedrock chat shapes, and with `protocol(.responses)`. OpenAI-compatible providers and Google stream over Chat Completions.
+- **Streaming** for the Bedrock chat shape, and with `protocol(.responses)`. OpenAI-compatible providers, Anthropic and Google stream.
 - **Video polling:** `Video.submit` returns the job id; fetching the result is not available.
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
 - **Cache resources:** creating a Google `cachedContents` resource ahead of time.
