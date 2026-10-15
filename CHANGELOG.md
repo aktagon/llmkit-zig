@@ -41,6 +41,13 @@ First release.
   total. Telemetry now exports a usage attribute when the value is *reported*,
   zero included, instead of when it is greater than zero.
 
+### Removed
+
+- **Vertex image generation removed.** Google shut down the Imagen endpoints.
+  Image generation on Vertex now fails with `error.UnsupportedImageProvider`
+  before any request is sent. Vertex music and video are unchanged, and the
+  Vertex default model is now `lyria-002`.
+
 ### Added
 
 - **Streaming with `protocol(.responses)`.** The stream terminal reads OpenAI
@@ -89,8 +96,8 @@ First release.
   calls only. `raw()` on `Text`, `Agent`, `Image`, `Music` and `Video` fills
   the response's `raw` field with the parsed provider reply.
 - `Agent` takes the `Text` generation options (`maxTokens` through
-  `safetySettings`). `Image` gains `text`, `mask`, `safetyFilter` and
-  `safetySettings`; `Music` gains `text` and `lyrics`; `Video` gains `text`
+  `safetySettings`). `Image` gains `text`, `mask` and `safetySettings`, plus
+  a deprecated `safetyFilter` that every provider rejects; `Music` gains `text` and `lyrics`; `Video` gains `text`
   and `outputURI`, and `submit` returns a `VideoHandle`. `Upload` takes its
   content from `bytes(data)` or `path(p)`, with `mimeType(m)`.
 - **Google cache resources.** With `caching()` on, a Google request first
