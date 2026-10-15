@@ -37,6 +37,7 @@ pub const capability = @import("capability.zig");
 pub const telemetry = @import("telemetry.zig");
 
 pub const Client = client.Client;
+pub const AwsCredentials = http.AwsCredentials;
 pub const Text = client.Text;
 pub const Agent = agent.Agent;
 pub const Tool = agent.Tool;

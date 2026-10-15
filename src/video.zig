@@ -192,13 +192,8 @@ pub const Video = struct {
         return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, prompt });
     }
 
-    /// `submit` over an injected transport (the seam tests mock).
-    ///
-    /// Bedrock caveat: `VideoBedrock` submits to a SigV4-signed endpoint. This
-    /// terminal composes the ordinary auth headers, so a Bedrock submit is not
-    /// signed and would be rejected live. Signing is `sigv4.zig`'s concern and is
-    /// wired at the chat seam only; the Bedrock BODY is still built and gated by
-    /// the request-wire golden.
+    /// `submit` over an injected transport (the seam tests mock). A Bedrock
+    /// submit is SigV4-signed by `send.zig`, like every other Bedrock send.
     pub fn submitWith(
         self: Video,
         transport: http.Transport,

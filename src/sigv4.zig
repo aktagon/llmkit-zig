@@ -25,6 +25,10 @@ pub const Signature = struct {
     canonical_request: []const u8,
     string_to_sign: []const u8,
     authorization: []const u8,
+    /// Lowercase hex SHA-256 of the body. It is a SIGNED header
+    /// (`x-amz-content-sha256`), so the send path must put this exact value on
+    /// the wire.
+    payload_hash: []const u8,
 };
 
 pub const SignInput = struct {
@@ -100,8 +104,37 @@ pub fn signAt(arena: std.mem.Allocator, in: SignInput) !Signature {
         .{ in.access_key, scope, signed, signature },
     );
 
-    return .{ .canonical_request = canonical_request, .string_to_sign = string_to_sign, .authorization = authorization };
+    return .{
+        .canonical_request = canonical_request,
+        .string_to_sign = string_to_sign,
+        .authorization = authorization,
+        .payload_hash = payload_hash,
+    };
 }
+
+/// Format Unix seconds as the SigV4 `YYYYMMDDTHHMMSSZ` timestamp (UTC) into
+/// `buf`. Times before the epoch clamp to it; no real clock reports one.
+pub fn amzDate(buf: *[16]u8, unix_s: i64) []const u8 {
+    const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(unix_s, 0)) };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
+        yd.year,
+        md.month.numeric(),
+        @as(u8, md.day_index) + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
+
+
+
+
+
+
 
 fn headerLessThan(_: void, a: Header, b: Header) bool {
     return std.mem.lessThan(u8, a.name, b.name);

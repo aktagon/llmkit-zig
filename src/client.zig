@@ -58,6 +58,17 @@ pub const Client = struct {
         return c;
     }
 
+    /// Set the AWS signing credentials for a SigV4 provider (Bedrock). The
+    /// access key ID is the `key` every terminal already takes; this supplies
+    /// the secret access key, the optional session token, and the region. The
+    /// slices are borrowed and must outlive the client. A SigV4 send without
+    /// them fails with `error.MissingAwsCredentials`.
+    pub fn awsCredentials(self: Client, creds: http.AwsCredentials) Client {
+        var c = self;
+        c.ctx.aws = creds;
+        return c;
+    }
+
     /// Set how long this client waits for the next bytes from the provider
     /// before it fails the request with `error.Timeout` (last call wins). The
     /// wait covers the response headers and every gap between body chunks, so
@@ -917,3 +928,68 @@ const TestHook = struct {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn sentHeader(req: http.Request, name: []const u8) ?[]const u8 {
+    for (req.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    return null;
+}
