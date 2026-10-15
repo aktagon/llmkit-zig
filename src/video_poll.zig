@@ -358,8 +358,8 @@ fn replaceAll(arena: std.mem.Allocator, haystack: []const u8, needle: []const u8
 }
 
 /// A UUID-v4-shaped trace id (PixVerse's per-request `Ai-trace-id`, an
-/// anti-cache key), from `io`'s random source.
-fn traceId(arena: std.mem.Allocator, io: std.Io) ![]const u8 {
+/// anti-cache key), from `io`'s random source. Submit and poll both send one.
+pub fn traceId(arena: std.mem.Allocator, io: std.Io) ![]const u8 {
     var b: [16]u8 = undefined;
     io.random(&b);
     b[6] = (b[6] & 0x0f) | 0x40;
