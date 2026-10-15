@@ -200,16 +200,20 @@ for (resp.audio) |clip| {
 }
 ```
 
-### Video: submit a job
+### Video: submit and wait
 
 ```zig
-const operation_id = try client.video()
+const handle = try client.video()
     .model("veo-3.0-generate-001")
     .submit(arena, key, "A paper boat drifting down a stream");
-std.debug.print("submitted: {s}\n", .{operation_id});
+
+const st = try handle.wait(arena);
+if (st.result) |resp| {
+    for (resp.videos) |v| std.debug.print("{s}, {d} bytes, url={s}\n", .{ v.mime_type, v.bytes.len, v.url });
+}
 ```
 
-`submit` returns the provider's job id. Polling a video job is not yet supported; see [Not yet supported](#not-yet-supported).
+`submit` returns a handle; `handle.value.id` is the provider's job id, which you can store and poll later. `poll` makes one request and reports the job state; `wait` polls every 5 seconds until the job finishes, and returns `error.PollTimeout` after 10 minutes. A failed job has state `.failed`, with the provider's message in `st.cause.?.message`. Depending on the provider, a finished video carries its bytes or a URL.
 
 ### Speech: text-to-speech
 
@@ -384,7 +388,6 @@ The `ptr` is yours: point it at whatever state the hook needs. It must outlive e
 
 - **AWS Bedrock:** requests are not signed, so Bedrock calls cannot be sent.
 - **Streaming** for the Anthropic and Bedrock chat shapes, and with `protocol(.responses)`. OpenAI-compatible providers and Google stream over Chat Completions.
-- **Video polling:** `Video.submit` returns the job id; fetching the result is not available.
 - **Cache resources:** creating a Google `cachedContents` resource ahead of time.
 - **Raw responses:** the `raw` field on responses is always null.
 - **Telemetry export:** the client does not send OpenTelemetry spans.

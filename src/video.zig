@@ -1,6 +1,6 @@
 //! Video generation (text-to-video, ADR-034 Slice 4) — a mirror of the
-//! submit-body construction in rust/src/video.rs and go/video.go, minus the
-//! async runtime.
+//! submit side of rust/src/video.rs and go/video.go. The poll/wait half is
+//! `video_poll.zig` (`VideoHandle`).
 //!
 //! One pure seam the request-wire goldens assert:
 //!   - `Video.buildSubmitBody` produces the SUBMIT request body per the
@@ -23,11 +23,8 @@
 //!         This is the submit BODY only: SigV4 signing is a separate concern
 //!         (the sigv4-wire suite), not done here.
 //!
-//! The async runtime (VideoHandle, the poll/wait loop, the two-hop file
-//! retrieve, delivery download, and any HTTP send) is a later slice — no video
-//! response/lifecycle wire fixture gates it and Zig has no HTTP send terminal
-//! yet. This file builds only the outbound submit bytes, backed by a
-//! caller-supplied allocator (pass an arena; free it in one shot).
+//! `Video.submit` POSTs that body and returns a `VideoHandle`; the handle's
+//! `poll` / `wait` live in `video_poll.zig`, on the shared Job engine.
 
 const std = @import("std");
 const http = @import("http.zig");
@@ -36,6 +33,9 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
 const request_variant = @import("request_variant.zig");
+const video_poll = @import("video_poll.zig");
+
+pub const VideoHandle = video_poll.VideoHandle;
 
 pub const ProviderName = providers.ProviderName;
 
@@ -124,26 +124,16 @@ pub const Video = struct {
         return buildSharedBody(arena, self, prompt);
     }
 
-    /// Submit a video-generation job and return the PROVIDER JOB ID.
-    ///
-    /// Video generation is asynchronous everywhere: the submit hop answers with a
-    /// handle, and the finished mp4 arrives only after polling. This terminal is
-    /// the submit hop ONLY. **There is deliberately no `VideoHandle` type and no
-    /// poll/wait here** — video's poll adapter belongs to ADR-062 slice 2, which
-    /// puts video onto the shared `job.zig` engine together with the
-    /// `AsyncJobLifecycle` fact block and the video lifecycle-wire goldens,
-    /// across all seven SDKs. Returning a bare id says exactly what the SDK can
-    /// do today; a handle whose `poll` was unimplemented would claim more than
-    /// that and would then be replaced by slice 2 anyway.
-    ///
-    /// Callers who need the finished asset today poll the provider's own
-    /// `poll_endpoint` with this id.
+    /// Submit a video-generation job and return a `VideoHandle`. The submit
+    /// hop answers with the provider's job id (read at the config's
+    /// `submit_handle_field`); poll the handle with `poll`, or block with
+    /// `wait`, to get the finished video. Mirrors Go/Rust `Video.Submit`.
     pub fn submit(
         self: Video,
         arena: std.mem.Allocator,
         api_key: []const u8,
         prompt: []const u8,
-    ) ![]const u8 {
+    ) !VideoHandle {
         return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, prompt });
     }
 
@@ -160,7 +150,7 @@ pub const Video = struct {
         arena: std.mem.Allocator,
         api_key: []const u8,
         prompt: []const u8,
-    ) ![]const u8 {
+    ) !VideoHandle {
         const cfg = video_gen.videoGenConfig(self.provider) orelse
             return error.UnsupportedVideoProvider;
         // ADR-096: a seed frame selects the WithReferenceImages submit request;
@@ -185,7 +175,18 @@ pub const Video = struct {
             .model = self.model_ orelse "",
         }, body);
 
-        return handleIdAt(arena, raw, cfg.submit_handle_field) orelse error.MissingVideoHandle;
+        const id = handleIdAt(arena, raw, cfg.submit_handle_field) orelse return error.MissingVideoHandle;
+        return .{
+            .value = .{
+                .id = try arena.dupe(u8, id),
+                .provider = self.provider,
+                .raw = false,
+                // Vertex Veo polls a model-templated path, so the handle keeps it.
+                .model = self.model_ orelse "",
+            },
+            .ctx = self.ctx,
+            .api_key = api_key,
+        };
     }
 };
 
@@ -312,6 +313,11 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
 
 
 
