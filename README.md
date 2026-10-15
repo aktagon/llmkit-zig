@@ -234,12 +234,10 @@ std.debug.print("{s}\n", .{resp.text});
 ### Upload
 
 ```zig
-const pdf = try std.Io.Dir.cwd().readFileAlloc(io, "report.pdf", arena, .unlimited);
-
 const file = try client.upload()
-    .filename("report.pdf")
-    .mime("application/pdf")
-    .run(arena, key, pdf);
+    .path("report.pdf")
+    .mimeType("application/pdf")
+    .run(arena, key);
 
 const resp = try client.text()
     .file(file.id)
