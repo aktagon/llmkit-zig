@@ -43,6 +43,10 @@ First release.
 
 ### Added
 
+- **Streaming with `protocol(.responses)`.** The stream terminal reads OpenAI
+  Responses stream events: text deltas, then the finish reason and token usage
+  from `response.completed`. The request carries no `stream_options`, which the
+  Responses API rejects.
 - **AWS Bedrock sends.** Every Bedrock request (text, agent, and video submit)
   is signed with AWS Signature Version 4. `Client.awsCredentials` takes the
   secret access key, the optional session token, and the region; the access
@@ -160,10 +164,3 @@ First release.
 - Requests carrying a JSON body now send `Content-Type: application/json`.
 - The client base-URL override now applies to every send path, not only the
   catalogue request assembly.
-
-### Known limitations
-
-These are not supported yet:
-
-- **Streaming with `protocol(.responses)`** returns empty text: Responses
-  stream events are not read yet.
