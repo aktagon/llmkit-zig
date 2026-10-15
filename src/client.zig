@@ -3,9 +3,7 @@
 //! Builders are immutable value types: each chain method returns a fresh copy
 //! (`var s = self; …; return s;`), so a forked chain never mutates its parent.
 //! Chain methods take neither `io` nor an allocator; only the terminals do the
-//! I/O and thus take `io` + a `gpa`. Phase 0 stops at `buildBody` — the
-//! HTTP-sending terminal (`prompt`) arrives with the HTTP module in a later
-//! phase; the wire suite asserts the body `buildBody` produces.
+//! I/O, through the `io` and `gpa` the client was built with.
 
 const std = @import("std");
 const json = @import("json.zig");
@@ -29,6 +27,9 @@ const capability = @import("capability.zig");
 const middleware = @import("middleware.zig");
 
 pub const ProviderName = providers.ProviderName;
+
+/// One turn of a conversation history (the generated cross-SDK struct).
+pub const Message = @import("providers/generated/structs.zig").Message;
 
 /// Chat-protocol selector (ADR-055), re-exported from `request.zig`.
 pub const Protocol = request.Protocol;
@@ -159,6 +160,9 @@ pub const Client = struct {
 /// like `Client.addHeader`. 8 is generous over any single-turn multimodal use.
 const max_media_parts = 8;
 
+/// Fixed capacity for `Text.text` Parts, for the same reason as media Parts.
+const max_text_parts = 8;
+
 pub const Text = struct {
     provider: providers.ProviderName,
     ctx: http.Ctx,
@@ -180,6 +184,9 @@ pub const Text = struct {
     caching_: bool = false,
     media_: [max_media_parts]request.MediaPart = undefined,
     media_count_: usize = 0,
+    text_parts_: [max_text_parts][]const u8 = undefined,
+    text_part_count_: usize = 0,
+    history_: []const Message = &.{},
 
     pub fn model(self: Text, m: []const u8) Text {
         var s = self;
@@ -321,6 +328,29 @@ pub const Text = struct {
         return s;
     }
 
+    /// Append a text input Part (ADR-021 appender). Text Parts precede the
+    /// terminal's prompt in the user turn, in call order, newline-joined.
+    /// Mirrors Rust/Go `text(s)`.
+    pub fn text(self: Text, s_: []const u8) Text {
+        var s = self;
+        std.debug.assert(s.text_part_count_ < max_text_parts);
+        s.text_parts_[s.text_part_count_] = s_;
+        s.text_part_count_ += 1;
+        return s;
+    }
+
+    /// Replace the conversation history for this call (ADR-020). The terminal's
+    /// prompt, when non-empty, is sent as a final user turn after it. An
+    /// assistant turn carrying a `provider_turn` captured under this request's
+    /// wire shape is replayed verbatim; any other turn is rebuilt from its
+    /// fields (ADR-085). `msgs` is caller-owned and must outlive the terminal.
+    /// Mirrors Rust/Go `history(msgs)`.
+    pub fn history(self: Text, msgs: []const Message) Text {
+        var s = self;
+        s.history_ = msgs;
+        return s;
+    }
+
     /// Append an uploaded-file input Part by id (ADR-060 / BUG-014). Emits an
     /// Anthropic `document` or an OpenAI-style `file` block, selected by wire
     /// shape (never provider name). Mirrors Rust/Go `file(id)`.
@@ -344,6 +374,8 @@ pub const Text = struct {
             .model = self.model_,
             .system = self.system_,
             .prompt = text_prompt,
+            .text_parts = self.text_parts_[0..self.text_part_count_],
+            .history = self.history_,
             .media = self.media_[0..self.media_count_],
             .max_tokens = self.max_tokens_,
             .temperature = self.temperature_,
@@ -363,7 +395,7 @@ pub const Text = struct {
     }
 
     /// Build the request body for this configuration. Returns a Value backed by
-    /// `arena`. Phase 0/1 do no HTTP send.
+    /// `arena`. Sends nothing; `prompt` sends this body.
     pub fn buildBody(self: Text, arena: std.mem.Allocator, text_prompt: []const u8) request.BuildError!json.Value {
         return request.buildChatBody(arena, self.chatConfig(text_prompt));
     }
@@ -432,16 +464,16 @@ pub const Text = struct {
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
-            .endpoint = providers.spec(self.provider).endpoint,
+            .endpoint = try request.chatEndpoint(arena, cfg),
             .extra_headers = try request.buildRequestHeaders(arena, cfg),
             .op = .llm_request,
-            .model = self.model_ orelse "",
+            .model = try request.effectiveModel(providers.spec(self.provider), cfg.model),
         }, try request.buildChatBody(arena, cfg));
         // The EFFECTIVE wire shape — the same one buildChatBody resolved — so a
         // `.protocol(.responses)` reply is decoded with the Responses envelope
         // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
         const shape = try request.resolveWireShape(providers.spec(self.provider), cfg.protocol);
-        var resp = try response_mod.decodeResponse(arena, self.provider, shape, reply.value);
+        var resp = (try response_mod.decodeResponse(arena, self.provider, shape, reply.value)).response;
         // ADR-085: capture the assistant turn as the provider serialized it, from
         // the reply BYTES. decodeResponse only ever sees the parsed tree, which
         // has no memory of them (ADR-069 ZIG-002), so the capture happens here.
@@ -543,6 +575,92 @@ const TestHook = struct {
         return .{ .ptr = self, .call_fn = call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -30,32 +30,9 @@ const http = @import("http.zig");
 
 pub const Capability = @import("capability.zig").Capability;
 
-/// The universal model descriptor (ADR-019). Hand-written here — the generated
-/// `structs.zig` (which declares the cross-SDK `ModelInfo`) is not yet wired
-/// into the module graph, so, like `speech.SpeechResponse` and
-/// `transcription.TranscriptionResponse`, this SDK carries its own copy. Field
-/// shape mirrors the generated struct exactly; `capabilities` is always
+/// The universal model descriptor (ADR-019). `capabilities` is always
 ///
-pub const ModelInfo = struct {
-    /// Provider-scoped model identifier (round-tripped verbatim).
-    id: []const u8,
-    /// The provider that exposes this model.
-    provider: providers.ProviderName,
-    ///
-    capabilities: []const Capability,
-    /// Human-readable name when the provider supplies one (else empty).
-    display_name: []const u8,
-    /// Provider free-text description (else empty).
-    description: []const u8,
-    /// Max input tokens when published (else 0).
-    context_window: i64,
-    /// Max output tokens when published (else 0).
-    max_output: i64,
-    /// Unix creation time when published (else 0; compiled entries are 0).
-    created: i64,
-    /// Parsed provider-native record, populated only under `.raw()`.
-    raw: ?std.json.Value = null,
-};
+pub const ModelInfo = @import("providers/generated/structs.zig").ModelInfo;
 
 /// Catalogue error sentinel. A provider without `hasModelsEndpoint`
 /// (no generated `catalogueConfig`) has nothing to fetch — `listRequest`
@@ -251,6 +228,28 @@ pub const Providers = struct {
 };
 
 // === Unit tests (offline compiled walk + URL assembly) ===
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

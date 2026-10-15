@@ -41,12 +41,7 @@ const boundary_str = "----llmkitZigUploadBoundary7MA4YWxkTrZu0gW";
 /// An uploaded file as the provider reports it. `id` is the value to hand to
 /// `Text.file(...)`; the other fields are populated only when the provider's
 /// config declares a path for them.
-pub const File = struct {
-    id: []const u8,
-    uri: []const u8 = "",
-    name: []const u8 = "",
-    mime_type: []const u8 = "",
-};
+pub const File = @import("providers/generated/structs.zig").File;
 
 /// The public Upload builder. Immutable value type, like every other builder.
 pub const Upload = struct {

@@ -36,35 +36,19 @@ const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
 const transcription_gen = @import("providers/generated/transcription_gen.zig");
 const response = @import("response.zig");
+const structs = @import("providers/generated/structs.zig");
 
 pub const ProviderName = providers.ProviderName;
 
-/// One timed span of transcript (ADR-048). Slice-3 segments carry text plus
-/// millisecond offsets and an optional diarized speaker label (empty for the
-/// OpenAI sync shape). Declared here — as `image.zig` declares its own
-/// `ImageData` — rather than consumed from the generated `structs.zig`, which
-/// is not yet wired into the module graph. Mirrors Rust/Go `TranscriptSegment`.
-pub const TranscriptSegment = struct {
-    text: []const u8,
-    /// Segment start offset in milliseconds.
-    start: i64 = 0,
-    /// Segment end offset in milliseconds.
-    end: i64 = 0,
-    /// Diarized speaker label when the provider reports one; empty otherwise.
-    speaker: []const u8 = "",
-};
+/// One timed span of transcript (ADR-048): text plus millisecond offsets and an
+/// optional diarized speaker label (empty for the OpenAI sync shape).
+pub const TranscriptSegment = structs.TranscriptSegment;
 
 /// The normalized speech-to-text reply: the full transcript text, the timed
-/// segments, the shared token carrier (unreported for STT), and an optional
-/// finish reason. The container is TEXT-shaped, not a media `*Data` container —
-/// the structural divergence from video/speech (ADR-048). Mirror of Rust/Go
-/// `TranscriptionResponse`.
-pub const TranscriptionResponse = struct {
-    text: []const u8,
-    segments: []const TranscriptSegment,
-    usage: response.Usage = .{},
-    finish_reason: ?[]const u8 = null,
-};
+/// segments, and the shared token carrier (unreported for STT). The container
+/// is TEXT-shaped, not a media `*Data` container — the structural divergence
+/// from video/speech (ADR-048).
+pub const TranscriptionResponse = structs.TranscriptionResponse;
 
 /// A real encoded multipart/form-data body plus the boundary it used. The driver
 /// decodes `body` against `boundary` back to the canonical descriptor
@@ -319,6 +303,7 @@ fn parseOpenAITranscription(arena: std.mem.Allocator, raw: json.Value) ParseErro
     return .{
         .text = text,
         .segments = try segments.toOwnedSlice(arena),
+        .usage = .{},
     };
 }
 

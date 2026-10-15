@@ -28,6 +28,8 @@ const caching_mod = @import("caching.zig");
 const providers = @import("providers/generated/providers.zig");
 const opts = @import("options_apply.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
+const structs = @import("providers/generated/structs.zig");
+const messages_mod = @import("messages.zig");
 
 /// A non-text input Part on the ChatCompletion text path (ADR-060), re-exported
 /// from `parts.zig` where the per-provider serialization lives.
@@ -52,6 +54,15 @@ pub const ChatConfig = struct {
     model: ?[]const u8 = null,
     system: ?[]const u8 = null,
     prompt: []const u8,
+    /// Text Parts that precede `prompt`, in caller order. The user turn's text
+    /// is these and the prompt, newline-joined, skipping empty ones (the
+    /// text-parts-openai golden). Empty keeps `prompt` as the text, unchanged.
+    text_parts: []const []const u8 = &.{},
+    /// A multi-turn history (ADR-020). When non-empty, the body's message
+    /// array is built from it, with the user text appended as a final user
+    /// turn when non-empty; media Parts are not sent on this path (Rust
+    /// parity). Empty keeps the single-user-turn shape, byte for byte.
+    history: []const structs.Message = &.{},
     /// Media Parts (image/file) that precede the prompt text Part in the user
     /// turn, in caller order (ADR-060). Empty keeps the bare-text wire shape.
     media: []const MediaPart = &.{},
@@ -82,7 +93,36 @@ pub const ChatConfig = struct {
     caching: bool = false,
 };
 
-pub const BuildError = error{UnsupportedWireShape} || std.mem.Allocator.Error;
+pub const BuildError = error{ UnsupportedWireShape, InvalidMessage, NoModel } || std.mem.Allocator.Error;
+
+/// The model a chat request runs on: the caller's choice, else the provider's
+/// declared default. `error.NoModel` when neither exists (a local daemon
+/// declares no default). Mirrors Rust `resolve_model`.
+pub fn effectiveModel(spec: providers.ProviderSpec, model: ?[]const u8) error{NoModel}![]const u8 {
+    if (model) |m| return m;
+    if (spec.default_model.len == 0) return error.NoModel;
+    return spec.default_model;
+}
+
+/// The chat endpoint for `protocol`, with `{model}` substituted: the endpoint
+/// of the `chat_protocols` entry whose wire shape the protocol resolves to
+/// (`/v1/responses` under `.responses`), so the URL and the body envelope
+/// cannot disagree. Mirrors Rust `build_url` over the effective config.
+pub fn chatEndpoint(
+    arena: std.mem.Allocator,
+    cfg: ChatConfig,
+) (BuildError || error{NoModel})![]const u8 {
+    const spec = providers.spec(cfg.provider);
+    const shape = try resolveWireShape(spec, cfg.protocol);
+    var endpoint = spec.endpoint;
+    for (spec.chat_protocols) |cp| {
+        if (std.mem.eql(u8, cp.wire_shape, shape)) {
+            endpoint = cp.endpoint;
+            break;
+        }
+    }
+    return http.substituteModel(arena, endpoint, try effectiveModel(spec, cfg.model));
+}
 
 /// Build the ChatCompletion request body as a dynamic JSON Value backed by
 /// `arena`, dispatching on the provider's `chat_wire_shape`. Phase 2 covers
@@ -98,16 +138,22 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
     // by fact, never a provider name (ADR-055, mirrors Go `resolveChatProtocol`
     // / Rust `resolve_chat_protocol`).
     const shape = try resolveWireShape(spec, cfg.protocol);
+
+    var c = cfg;
+    c.model = try effectiveModel(spec, cfg.model);
+    c.prompt = try userText(arena, cfg.text_parts, cfg.prompt);
+    const msgs = try historyMsgs(arena, c, spec, shape);
+
     var body = if (std.mem.eql(u8, shape, "ChatOpenAI"))
-        try buildOpenAIBody(arena, cfg)
+        try buildOpenAIBody(arena, c, msgs)
     else if (std.mem.eql(u8, shape, "ChatResponsesOpenAI"))
-        try buildResponsesBody(arena, cfg)
+        try buildResponsesBody(arena, c, msgs)
     else if (std.mem.eql(u8, shape, "ChatAnthropic"))
-        try buildAnthropicBody(arena, cfg)
+        try buildAnthropicBody(arena, c, msgs)
     else if (std.mem.eql(u8, shape, "ChatGoogle"))
-        try buildGoogleBody(arena, cfg)
+        try buildGoogleBody(arena, c, msgs)
     else if (std.mem.eql(u8, shape, "ChatBedrock"))
-        try buildBedrockBody(arena, cfg)
+        try buildBedrockBody(arena, c, msgs)
     else
         return error.UnsupportedWireShape;
 
@@ -121,6 +167,36 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
     // uses explicit caching.
     if (cfg.caching) try caching_mod.applyCaching(arena, &body, cfg.provider);
     return body;
+}
+
+/// The user turn's text: non-empty text Parts then the prompt, newline-joined.
+/// With no text Parts the prompt is returned as is, so the single-turn bytes
+/// do not change.
+fn userText(arena: std.mem.Allocator, text_parts: []const []const u8, prompt: []const u8) ![]const u8 {
+    if (text_parts.len == 0) return prompt;
+    var texts: std.ArrayList([]const u8) = .empty;
+    for (text_parts) |t| if (t.len > 0) try texts.append(arena, t);
+    if (prompt.len > 0) try texts.append(arena, prompt);
+    return std.mem.join(arena, "\n", texts.items);
+}
+
+/// The internal history for `cfg`, or an empty slice for the single-turn
+/// shape. The user text rides as a final user turn when non-empty, and every
+/// captured turn that cannot replay under `shape` is unwrapped to its
+/// projection (ADR-085 RSN-006).
+fn historyMsgs(
+    arena: std.mem.Allocator,
+    cfg: ChatConfig,
+    spec: providers.ProviderSpec,
+    shape: []const u8,
+) BuildError![]const messages_mod.Msg {
+    if (cfg.history.len == 0) return &.{};
+    const converted = try messages_mod.toInternal(arena, cfg.history);
+    var msgs: std.ArrayList(messages_mod.Msg) = .fromOwnedSlice(converted);
+    if (cfg.prompt.len > 0)
+        try msgs.append(arena, .{ .text = .{ .role = "user", .text = cfg.prompt } });
+    messages_mod.resolveTurns(msgs.items, spec, shape);
+    return msgs.items;
 }
 
 /// One HTTP request header name/value pair produced by the pure header seam.
@@ -240,13 +316,17 @@ pub fn resolveWireShape(spec: providers.ProviderSpec, protocol: Protocol) BuildE
 /// Completions (`messages`) and Responses (`input`) envelopes: a leading
 /// `{role:"system", content:...}` message when a system prompt is set, then the
 /// user turn (with any media Parts). Mirrors Go `buildFlatMessageArray`.
-fn flatMessages(arena: std.mem.Allocator, cfg: ChatConfig) !json.Value {
+fn flatMessages(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg, shape: []const u8) !json.Value {
     var messages = json.array(arena);
     if (cfg.system) |sys| {
         var sm = json.object();
         try json.set(arena, &sm, "role", .{ .string = "system" });
         try json.set(arena, &sm, "content", .{ .string = sys });
         try messages.array.append(sm);
+    }
+    if (msgs.len > 0) {
+        try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, shape);
+        return messages;
     }
     var um = json.object();
     try json.set(arena, &um, "role", .{ .string = "user" });
@@ -257,10 +337,10 @@ fn flatMessages(arena: std.mem.Allocator, cfg: ChatConfig) !json.Value {
 
 /// The `ChatOpenAI` wire shape: the system prompt (when present) is a leading
 /// `{role:"system", content:...}` message inside `messages`.
-fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg) BuildError!json.Value {
     var body = json.object();
     if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
-    try json.set(arena, &body, "messages", try flatMessages(arena, cfg));
+    try json.set(arena, &body, "messages", try flatMessages(arena, cfg, msgs, "ChatOpenAI"));
 
     // Options and root extras both land on `body` (no wrapper): opts_target == root.
     try applyOptions(arena, &body, &body, cfg);
@@ -272,10 +352,10 @@ fn buildOpenAIBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
 /// output-token cap is `max_output_tokens` for every model; `applyOptions`
 /// reads that key from the generated wire-shape table (BUG-075). Every other
 /// field is shared with the Chat Completions shape.
-fn buildResponsesBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+fn buildResponsesBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg) BuildError!json.Value {
     var body = json.object();
     if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
-    try json.set(arena, &body, "input", try flatMessages(arena, cfg));
+    try json.set(arena, &body, "input", try flatMessages(arena, cfg, msgs, "ChatResponsesOpenAI"));
 
     // Options land flat on `body` (no wrapper), exactly as the ChatOpenAI shape.
     try applyOptions(arena, &body, &body, cfg);
@@ -288,16 +368,20 @@ fn buildResponsesBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json
 /// OpenAI shape (same table-driven `applyOptions`); Anthropic's wire keys
 /// (`stop_sequences`, `top_k`, `thinking.*`, `output_config.effort` + root
 /// `thinking:{type:adaptive}`) come from the generated option table.
-fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg) BuildError!json.Value {
     var body = json.object();
     if (cfg.model) |m| try json.set(arena, &body, "model", .{ .string = m });
     if (cfg.system) |sys| try json.set(arena, &body, "system", .{ .string = sys });
 
     var messages = json.array(arena);
-    var um = json.object();
-    try json.set(arena, &um, "role", .{ .string = "user" });
-    try json.set(arena, &um, "content", try parts.anthropicUserContent(arena, cfg.media, cfg.prompt));
-    try messages.array.append(um);
+    if (msgs.len > 0) {
+        try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, "ChatAnthropic");
+    } else {
+        var um = json.object();
+        try json.set(arena, &um, "role", .{ .string = "user" });
+        try json.set(arena, &um, "content", try parts.anthropicUserContent(arena, cfg.media, cfg.prompt));
+        try messages.array.append(um);
+    }
     try json.set(arena, &body, "messages", messages);
 
     // Options and root extras both land on `body` (no wrapper): opts_target == root.
@@ -315,16 +399,20 @@ fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json
 /// at the body root. Root extras (ADR-029 THK-003, none in these fixtures)
 /// still merge into the true body root, never the wrapper. Wire keys come
 /// from the generated option table exactly as the flat shapes do.
-fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
     var body = json.object();
 
-    var contents = json.array(arena);
-    var turn = json.object();
-    try json.set(arena, &turn, "role", .{ .string = "user" });
-    try json.set(arena, &turn, "parts", try parts.googleParts(arena, cfg.media, cfg.prompt));
-    try contents.array.append(turn);
-    try json.set(arena, &body, "contents", contents);
+    if (msgs.len > 0) {
+        try json.set(arena, &body, "contents", try messages_mod.googleContents(arena, msgs, cfg.provider));
+    } else {
+        var contents = json.array(arena);
+        var turn = json.object();
+        try json.set(arena, &turn, "role", .{ .string = "user" });
+        try json.set(arena, &turn, "parts", try parts.googleParts(arena, cfg.media, cfg.prompt));
+        try contents.array.append(turn);
+        try json.set(arena, &body, "contents", contents);
+    }
 
     if (cfg.system) |sys| {
         var si = json.object();
@@ -369,7 +457,7 @@ fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Va
 /// `stopSequences`, `temperature`, `top_p` — wire keys from the generated
 /// option table). Root extras (ADR-029 THK-003, none here) still merge into the
 /// true body root, never the wrapper.
-fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.Value {
+fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg) BuildError!json.Value {
     const spec = providers.spec(cfg.provider);
     var body = json.object();
 
@@ -380,10 +468,14 @@ fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.V
 
     // User turn: `content` is an ARRAY of `{text:...}` blocks, not a bare string.
     var messages = json.array(arena);
-    var turn = json.object();
-    try json.set(arena, &turn, "role", .{ .string = "user" });
-    try json.set(arena, &turn, "content", try parts.bedrockContent(arena, cfg.media, cfg.prompt));
-    try messages.array.append(turn);
+    if (msgs.len > 0) {
+        try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, "ChatBedrock");
+    } else {
+        var turn = json.object();
+        try json.set(arena, &turn, "role", .{ .string = "user" });
+        try json.set(arena, &turn, "content", try parts.bedrockContent(arena, cfg.media, cfg.prompt));
+        try messages.array.append(turn);
+    }
     try json.set(arena, &body, "messages", messages);
 
     // Options nest in the `inferenceConfig` wrapper (opts_target = &wrapper);
@@ -462,3 +554,13 @@ fn applyOptions(arena: std.mem.Allocator, opts_target: *json.Value, root: *json.
 
     try json.mergeRoot(arena, root, root_extras);
 }
+
+
+
+
+
+
+
+
+
+

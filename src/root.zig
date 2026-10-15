@@ -1,8 +1,6 @@
 //! llmkit — the Zig client for llmkit. One typed API across many LLM providers.
 //!
-//! Phase 0 vertical slice: the JSON waist, the OpenAI-shape request builder,
-//! and the public client + Text builder. HTTP send, the remaining wire shapes,
-//! and the media/async capabilities arrive in later phases.
+//! Start at `Client.init`; every capability is a builder reached from it.
 
 const std = @import("std");
 
@@ -15,6 +13,7 @@ const speech_gen = @import("providers/generated/speech_gen.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
 const batch_config = @import("providers/generated/batch.zig");
 const provider_info = @import("providers/generated/provider_info.zig");
+const structs = @import("providers/generated/structs.zig");
 pub const request = @import("request.zig");
 pub const response = @import("response.zig");
 pub const http = @import("http.zig");
@@ -68,6 +67,20 @@ pub const Providers = models.Providers;
 pub const ModelInfo = models.ModelInfo;
 pub const ProviderName = providers.ProviderName;
 pub const Protocol = client.Protocol;
+// Cross-SDK value types with no hand-written module home. The ones above that
+// have one (ImageData, File, ...) are aliases of these same generated structs.
+pub const Response = response.Response;
+pub const Message = structs.Message;
+pub const ToolCall = structs.ToolCall;
+pub const ToolResult = structs.ToolResult;
+pub const ProviderTurn = structs.ProviderTurn;
+pub const MediaRef = structs.MediaRef;
+pub const LiveResult = structs.LiveResult;
+pub const ProviderError = structs.ProviderError;
+pub const VideoData = structs.VideoData;
+pub const VideoResponse = structs.VideoResponse;
+pub const VideoHandle = structs.VideoHandle;
+pub const TranscriptionHandle = structs.TranscriptionHandle;
 pub const SafetySetting = client.SafetySetting;
 // === Keyless media-config accessors (ADR-036 public surface) ===
 //
@@ -99,6 +112,9 @@ pub const Event = telemetry.Event;
 pub const buildOtlpTraces = telemetry.buildOtlpTraces;
 pub const httpExport = telemetry.httpExport;
 pub const setEventError = telemetry.setEventError;
+
+
+
 
 
 

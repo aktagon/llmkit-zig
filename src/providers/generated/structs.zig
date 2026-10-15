@@ -2,6 +2,9 @@
 
 
 const std = @import("std");
+const ProviderName = @import("providers.zig").ProviderName;
+const Usage = @import("usage_gen.zig").Usage;
+const Capability = @import("../../capability.zig").Capability;
 
 /// AudioData is one decoded audio payload returned in a MusicResponse. Same shape as MediaRef (mime type + raw bytes) but a distinct type so capability-specific return semantics stay typed: MusicResponse.audio carries decoded outputs; MediaRef appears in input payloads.
 pub const AudioData = struct {

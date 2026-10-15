@@ -30,28 +30,18 @@ const middleware = @import("middleware.zig");
 const providers = @import("providers/generated/providers.zig");
 const speech_gen = @import("providers/generated/speech_gen.zig");
 const response = @import("response.zig");
+const structs = @import("providers/generated/structs.zig");
 
 pub const ProviderName = providers.ProviderName;
 
 /// One decoded audio payload: the provider's output MIME plus RAW bytes (already
-/// base64-decoded from the wire for the envelope shape). Distinct from the text
-/// path's media Part so capability-specific return semantics stay typed. Mirrors
-/// Rust/Go `AudioData` (ADR-018 bytes/mime accessor). Declared here — as
-/// `image.zig` declares its own `ImageData` — rather than consumed from the
-/// generated `structs.zig`, which is not yet wired into the module graph.
-pub const AudioData = struct {
-    mime_type: []const u8,
-    bytes: []const u8,
-};
+/// base64-decoded from the wire for the envelope shape).
+pub const AudioData = structs.AudioData;
 
 /// The normalized text-to-speech reply: a single synthesized clip (one
 /// synthesis, one clip — ADR-049 OQ-4), the shared token carrier (unreported
-/// for speech), and an optional finish reason. Mirror of Rust `SpeechResponse`.
-pub const SpeechResponse = struct {
-    audio: AudioData,
-    usage: response.Usage = .{},
-    finish_reason: ?[]const u8 = null,
-};
+/// for speech), and an optional finish reason.
+pub const SpeechResponse = structs.SpeechResponse;
 
 pub const BuildError = error{UnsupportedSpeechProvider} || std.mem.Allocator.Error;
 pub const ParseError = error{ UnsupportedSpeechProvider, InvalidSpeechResponse } || std.mem.Allocator.Error;
@@ -197,7 +187,7 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, bod
     const mime: []const u8 = if (cfg.models.len > 0) cfg.models[0].output_mime else "";
 
     if (std.mem.eql(u8, cfg.audio_response_encoding, "rawBody")) {
-        return .{ .audio = .{ .mime_type = mime, .bytes = try arena.dupe(u8, body) } };
+        return .{ .audio = .{ .mime_type = mime, .bytes = try arena.dupe(u8, body) }, .usage = .{}, .finish_reason = null };
     }
 
     // base64Envelope: {"audioContent": "<base64>", "usage": {...}}.
@@ -207,7 +197,7 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, bod
     const b64 = getString(parsed.value, "audioContent") orelse return error.InvalidSpeechResponse;
     if (b64.len == 0) return error.InvalidSpeechResponse;
     const decoded = base64Decode(arena, b64) catch return error.InvalidSpeechResponse;
-    return .{ .audio = .{ .mime_type = mime, .bytes = decoded } };
+    return .{ .audio = .{ .mime_type = mime, .bytes = decoded }, .usage = .{}, .finish_reason = null };
 }
 
 /// Read a string field off an object Value; null when absent or not a string.
