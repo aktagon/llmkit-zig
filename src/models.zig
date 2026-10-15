@@ -96,7 +96,8 @@ pub fn catalogueListRequest(
     const cfg = catalogue.catalogueConfig(provider) orelse return error.NotSupported;
     const url = try appendCursor(
         arena,
-        try buildCatalogueUrl(arena, provider, base_url_override, cfg.endpoint, api_key),
+        // No SigV4 provider has a catalogue endpoint, so there is no region.
+        try buildCatalogueUrl(arena, provider, base_url_override, cfg.endpoint, api_key, ""),
         cfg.cursor_param,
         cursor,
     );

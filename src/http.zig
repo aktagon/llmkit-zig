@@ -108,7 +108,7 @@ pub const MockTransport = struct {
 ///     is carried by the fact).
 ///   - HeaderAPIKey -> `<auth_header>: <api_key>` (e.g. Anthropic `x-api-key`).
 ///   - QueryParamKey / SigV4 -> NO auth header (the key rides the URL, or the
-///     request is SigV4-signed) — the caller appends the query param / signs.
+///     request is SigV4-signed) — `send.zig` appends the query param / signs.
 /// The provider's `required_header` (e.g. Anthropic `anthropic-version`) is
 /// appended after. Returns an arena-backed slice. Mirrors Rust
 /// `build_auth_headers`.
@@ -130,6 +130,18 @@ pub fn buildAuthHeaders(arena: std.mem.Allocator, provider: providers.ProviderNa
 
     return list.toOwnedSlice(arena);
 }
+
+/// The AWS signing inputs other than the access key ID. The other SDKs read
+/// them from the environment variables the provider names
+/// (`secret_key_env_var`, `session_token_env_var`, `region_env_var`); Zig has
+/// no ambient environment, so the caller reads those variables and passes the
+/// values here, the same way it passes `api_key`.
+pub const AwsCredentials = struct {
+    secret_access_key: []const u8,
+    /// Empty when the credentials are not temporary (STS) ones.
+    session_token: []const u8 = "",
+    region: []const u8,
+};
 
 /// Fixed capacity for `Client.addHeader` (ADR-052). Client chain methods take
 /// no allocator (ADR-069 ZIG-005), so custom headers live in a bounded array
@@ -157,6 +169,14 @@ pub const Ctx = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     base_url: ?[]const u8 = null,
+    /// The signing inputs a SigV4 provider (Bedrock) needs beyond the access
+    /// key, which is the terminal's `api_key`. Set by `Client.awsCredentials`.
+    /// The slices are borrowed and must outlive the client.
+    aws: ?AwsCredentials = null,
+    /// Test seam: a fixed SigV4 signing time in Unix seconds. Null signs with
+    /// the `io` real-time clock. The timestamp is the only non-deterministic
+    /// signing input, so fixing it makes the whole signature reproducible.
+    signing_time_s: ?i64 = null,
     /// How long a send waits for the next bytes from the provider, in
     /// milliseconds (BUG-062). 0 disables it. Set by `Client.timeout`.
     timeout_ms: u64 = client_defaults.default_timeout_ms,
@@ -255,11 +275,21 @@ pub fn substituteModel(arena: std.mem.Allocator, template: []const u8, model_id:
     });
 }
 
+/// Substitute the `{region}` placeholder a provider's base URL may carry
+/// (Bedrock `https://bedrock-runtime.{region}.amazonaws.com`). A base without
+/// the placeholder is returned unchanged.
+fn substituteRegion(arena: std.mem.Allocator, base: []const u8, region: []const u8) ![]const u8 {
+    const placeholder = "{region}";
+    const idx = std.mem.indexOf(u8, base, placeholder) orelse return base;
+    return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ base[0..idx], region, base[idx + placeholder.len ..] });
+}
+
 /// Assemble a send URL: the client's base-URL override (else the provider's
 /// `base_url`) + `endpoint`, with the QueryParamKey `?key=` spliced in for
 /// query-auth providers (Google) — those carry NO auth header, so without this
 /// splice the request would go out unauthenticated. Bearer / header-key / SigV4
-/// providers carry the key elsewhere and get a bare URL.
+/// providers carry the key elsewhere and get a bare URL. `region` fills a
+/// `{region}` placeholder in the base URL (SigV4 providers); pass "" otherwise.
 ///
 /// VULN-001: the returned URL embeds the API key for query-auth providers.
 /// Never put it in an error message or a log line.
@@ -269,8 +299,9 @@ pub fn buildUrl(
     base_url_override: ?[]const u8,
     endpoint: []const u8,
     api_key: []const u8,
+    region: []const u8,
 ) ![]const u8 {
-    const base = base_url_override orelse providers.spec(provider).base_url;
+    const base = try substituteRegion(arena, base_url_override orelse providers.spec(provider).base_url, region);
     const full = try std.fmt.allocPrint(arena, "{s}{s}", .{ base, endpoint });
     if (request_defs.authScheme(provider) != .query_param_key) return full;
 
