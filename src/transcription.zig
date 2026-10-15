@@ -93,6 +93,14 @@ pub const Transcription = struct {
         return s;
     }
 
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`.
+    pub fn addMiddleware(self: Transcription, m: middleware.Middleware) Transcription {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
     /// Build the ASYNC submit body (`json` encoding, AssemblyAI) — the flat
     /// `{audio_url}` the async submit terminal would POST. `audio_url` is a
     /// public audio URL (the bytes-upload hop is the async runtime, a later
@@ -534,6 +542,29 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

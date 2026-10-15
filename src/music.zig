@@ -36,6 +36,7 @@ const response = @import("response.zig");
 const structs = @import("providers/generated/structs.zig");
 const providers = @import("providers/generated/providers.zig");
 const music_gen = @import("providers/generated/music_gen.zig");
+const middleware = @import("middleware.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -61,9 +62,16 @@ pub const BuildError = error{
 
 pub const ParseError = error{UnsupportedMusicProvider} || std.mem.Allocator.Error;
 
-/// Fixed capacity for `Music.lyrics` — chain methods take no allocator
-/// (ADR-069 ZIG-005), matching `Text`'s bounded media array.
-const max_lyrics_parts = 4;
+/// Fixed capacity for `Music.text` + `Music.lyrics` Parts — chain methods take
+/// no allocator (ADR-069 ZIG-005), matching `Text`'s bounded media array.
+const max_music_parts = 8;
+
+/// One input Part, in caller order: prompt text or lyrics (Rust `Part::Text` /
+/// `Part::Lyrics`).
+pub const MusicPart = union(enum) {
+    text: []const u8,
+    lyrics: []const u8,
+};
 
 /// The public Music builder. Immutable value type: each chain method returns a
 /// fresh copy, so a forked chain never mutates its parent.
@@ -71,8 +79,9 @@ pub const Music = struct {
     provider: ProviderName,
     ctx: http.Ctx,
     model_: ?[]const u8 = null,
-    lyrics_: [max_lyrics_parts][]const u8 = undefined,
-    lyrics_count_: usize = 0,
+    parts_: [max_music_parts]MusicPart = undefined,
+    part_count_: usize = 0,
+    raw_: bool = false,
 
     /// The music-generation model id (ADR-021 bare-noun replacer). Required:
     /// music models are explicit choices and there is no text-model default
@@ -83,15 +92,57 @@ pub const Music = struct {
         return s;
     }
 
-    /// Append a lyrics part (ADR-021 `Add*` appender). Advisory, not gated: a
-    /// model without `supports_lyrics` folds them into the prompt instead of
-    /// rejecting (ADR-037 relaxed this from a hard pre-flight reject).
-    pub fn addLyrics(self: Music, text: []const u8) Music {
+    /// Append a lyrics Part (ADR-021 appender). Advisory, not gated: a model
+    /// without `supports_lyrics` folds them into the prompt instead of
+    /// rejecting (ADR-037 relaxed this from a hard pre-flight reject). Mirrors
+    /// Rust `lyrics(s)`.
+    pub fn lyrics(self: Music, s_: []const u8) Music {
+        return self.appendPart(.{ .lyrics = s_ });
+    }
+
+    /// Append a prompt text Part (ADR-021 appender). Text Parts precede the
+    /// terminal's prompt: Gemini sends each as its own `{text}` part, the
+    /// other shapes newline-join them with the prompt. Mirrors Rust `text(s)`.
+    pub fn text(self: Music, s_: []const u8) Music {
+        return self.appendPart(.{ .text = s_ });
+    }
+
+    fn appendPart(self: Music, part: MusicPart) Music {
         var s = self;
-        std.debug.assert(s.lyrics_count_ < max_lyrics_parts);
-        s.lyrics_[s.lyrics_count_] = text;
-        s.lyrics_count_ += 1;
+        std.debug.assert(s.part_count_ < max_music_parts);
+        s.parts_[s.part_count_] = part;
+        s.part_count_ += 1;
         return s;
+    }
+
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`.
+    pub fn addMiddleware(self: Music, m: middleware.Middleware) Music {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
+    /// Opt in to `MusicResponse.raw` (ADR-014): `generate` sets it to the
+    /// parsed provider reply body. Null without this call.
+    pub fn raw(self: Music) Music {
+        var s = self;
+        s.raw_ = true;
+        return s;
+    }
+
+    /// The Parts of one kind plus, for text, the terminal's `prompt`,
+    /// newline-joined, skipping empty ones (Rust `join_prompt_text` /
+    /// `join_lyrics_text`).
+    fn joined(self: *const Music, arena: std.mem.Allocator, comptime kind: std.meta.Tag(MusicPart), prompt: []const u8) ![]const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (self.parts_[0..self.part_count_]) |p| {
+            if (p != kind) continue;
+            const v = @field(p, @tagName(kind));
+            if (v.len > 0) try out.append(arena, v);
+        }
+        if (kind == .text and prompt.len > 0) try out.append(arena, prompt);
+        return std.mem.join(arena, "\n", out.items);
     }
 
     /// Build the music request body, dispatched on the provider's generated
@@ -101,13 +152,14 @@ pub const Music = struct {
             return error.UnsupportedMusicProvider;
         _ = try self.resolveModel(cfg);
 
-        const lyrics = try std.mem.join(arena, "\n", self.lyrics_[0..self.lyrics_count_]);
+        const lyrics_text = try self.joined(arena, .lyrics, "");
+        const prompt_text = try self.joined(arena, .text, prompt);
 
         if (std.mem.eql(u8, cfg.wire_shape, shape_predict))
-            return buildPredictBody(arena, prompt, lyrics);
+            return buildPredictBody(arena, prompt_text, lyrics_text);
         if (std.mem.eql(u8, cfg.wire_shape, shape_minimax))
-            return buildMinimaxBody(arena, prompt, lyrics, self.model_ orelse "");
-        return buildGeminiBody(arena, prompt, self.lyrics_[0..self.lyrics_count_]);
+            return buildMinimaxBody(arena, prompt_text, lyrics_text, self.model_ orelse "");
+        return buildGeminiBody(arena, prompt, self.parts_[0..self.part_count_]);
     }
 
     /// Generate music and return the decoded clips. Mirrors Go `GenerateMusic` /
@@ -142,7 +194,7 @@ pub const Music = struct {
         if (ctx.base_url == null and cfg.base_url.len > 0)
             ctx.base_url = cfg.base_url;
 
-        const raw = try send.postJson(transport, arena, .{
+        const reply = try send.postJson(transport, arena, .{
             .provider = self.provider,
             .ctx = &ctx,
             .api_key = api_key,
@@ -151,7 +203,9 @@ pub const Music = struct {
             .model = self.model_ orelse "",
         }, body);
 
-        return parseMusicResponse(arena, self.provider, md.output_mime, raw);
+        var resp = try parseMusicResponse(arena, self.provider, md.output_mime, reply);
+        if (self.raw_) resp.raw = reply;
+        return resp;
     }
 
     /// The catalogue entry for the configured model. Unknown model is the one
@@ -182,13 +236,13 @@ fn replaceModel(arena: std.mem.Allocator, template: []const u8, model_id: []cons
 
 /// Vertex Lyria `:predict`: `{instances:[{prompt}], parameters:{sampleCount:1}}`.
 /// Lyrics fold onto the prompt (newline-joined) — this shape has no lyrics field.
-fn buildPredictBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []const u8) !json.Value {
-    const merged = if (lyrics.len == 0)
+fn buildPredictBody(arena: std.mem.Allocator, prompt: []const u8, lyrics_text: []const u8) !json.Value {
+    const merged = if (lyrics_text.len == 0)
         prompt
     else if (prompt.len == 0)
-        lyrics
+        lyrics_text
     else
-        try std.fmt.allocPrint(arena, "{s}\n{s}", .{ prompt, lyrics });
+        try std.fmt.allocPrint(arena, "{s}\n{s}", .{ prompt, lyrics_text });
 
     var instance = json.object();
     try json.set(arena, &instance, "prompt", .{ .string = merged });
@@ -207,7 +261,7 @@ fn buildPredictBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []cons
 /// MiniMax `/v1/music_generation`: `{model, prompt, output_format:"hex",
 /// audio_setting:{...}}` plus `lyrics` when present. `output_format:"hex"`
 /// is load-bearing — the parser decodes `data.audio` as hex, not base64.
-fn buildMinimaxBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []const u8, model_id: []const u8) !json.Value {
+fn buildMinimaxBody(arena: std.mem.Allocator, prompt: []const u8, lyrics_text: []const u8, model_id: []const u8) !json.Value {
     var audio_setting = json.object();
     try json.set(arena, &audio_setting, "sample_rate", .{ .integer = 44100 });
     try json.set(arena, &audio_setting, "bitrate", .{ .integer = 128000 });
@@ -218,19 +272,22 @@ fn buildMinimaxBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []cons
     try json.set(arena, &body, "prompt", .{ .string = prompt });
     try json.set(arena, &body, "output_format", .{ .string = "hex" });
     try json.set(arena, &body, "audio_setting", audio_setting);
-    if (lyrics.len > 0) try json.set(arena, &body, "lyrics", .{ .string = lyrics });
+    if (lyrics_text.len > 0) try json.set(arena, &body, "lyrics", .{ .string = lyrics_text });
     return body;
 }
 
-/// Gemini `generateContent` (Lyria 3): lyrics and prompt both serialise as
-/// `{text}` parts, the lyrics Parts in call order and the terminal's prompt
-/// last — the order every Part-taking terminal uses, and the one the
-/// music-google golden locks. `responseModalities:["AUDIO"]` asks for audio.
-fn buildGeminiBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []const []const u8) !json.Value {
+/// Gemini `generateContent` (Lyria 3): text and lyrics Parts both serialise
+/// as `{text}` parts in call order, and the terminal's prompt last — the order
+/// every Part-taking terminal uses, and the one the music-google golden locks.
+/// `responseModalities:["AUDIO"]` asks for audio.
+fn buildGeminiBody(arena: std.mem.Allocator, prompt: []const u8, parts: []const MusicPart) !json.Value {
     var wire = json.array(arena);
-    for (lyrics) |l| {
+    for (parts) |part| {
+        const v = switch (part) {
+            .text, .lyrics => |x| x,
+        };
         var p = json.object();
-        try json.set(arena, &p, "text", .{ .string = l });
+        try json.set(arena, &p, "text", .{ .string = v });
         try wire.array.append(p);
     }
     if (prompt.len > 0) {
@@ -369,6 +426,62 @@ const testing = std.testing;
 fn testMusic(gpa: std.mem.Allocator, provider: ProviderName) Music {
     return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = testing.io } };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

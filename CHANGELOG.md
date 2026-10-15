@@ -53,6 +53,14 @@ First release.
   conversation, usage sums every round, and each tool call fires `tool_call`
   middleware events that can veto it.
 - `Text.text(s)` adds a text part to the user turn.
+- Every builder has `addMiddleware`, for hooks that fire on that builder's
+  calls only. `raw()` on `Text`, `Agent`, `Image`, `Music` and `Video` fills
+  the response's `raw` field with the parsed provider reply.
+- `Agent` takes the `Text` generation options (`maxTokens` through
+  `safetySettings`). `Image` gains `text`, `mask`, `safetyFilter` and
+  `safetySettings`; `Music` gains `text` and `lyrics`; `Video` gains `text`
+  and `outputURI`, and `submit` returns a `VideoHandle`. `Upload` takes its
+  content from `bytes(data)` or `path(p)`, with `mimeType(m)`.
 - `batch_slot_missing` and `batch_slot_error`: the finish reasons of a batch
   slot with no result, and of a failed slot the provider gave no reason for.
   Compare against them instead of typing the strings.
@@ -127,15 +135,13 @@ These are not supported yet:
 
 - **AWS Bedrock cannot send.** Requests are not signed, so Bedrock rejects
   them.
-- **Raw responses.** The `raw` field on responses is always null; there is no
-  way to request it.
 - **Telemetry export.** The client does not send OpenTelemetry spans.
 - **Streaming with `protocol(.responses)`** returns empty text: Responses
   stream events are not read yet.
 
-- **Video generation is submit-only.** `video().submit` returns the provider's
-  job id, but there is no poll/wait runtime, so a caller must poll the provider
-  themselves.
+- **Video generation is submit-only.** `video().submit` returns a handle with
+  the provider's job id, but there is no poll/wait runtime, so a caller must
+  poll the provider themselves.
 - **Streaming covers OpenAI-shape providers and Google, not Anthropic.**
   Anthropic's stream is event-typed rather than data-only. Non-streaming
   Anthropic requests are unaffected, as is streaming for the other providers.

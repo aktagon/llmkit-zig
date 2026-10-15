@@ -23,11 +23,10 @@
 //!         This is the submit BODY only: SigV4 signing is a separate concern
 //!         (the sigv4-wire suite), not done here.
 //!
-//! The async runtime (VideoHandle, the poll/wait loop, the two-hop file
-//! retrieve, delivery download, and any HTTP send) is a later slice — no video
-//! response/lifecycle wire fixture gates it and Zig has no HTTP send terminal
-//! yet. This file builds only the outbound submit bytes, backed by a
-//! caller-supplied allocator (pass an arena; free it in one shot).
+//! `submit` sends the body and returns a `VideoHandle`. The poll/wait loop, the
+//! two-hop file retrieve and the delivery download are a later slice (ADR-062
+//! slice 2). Bodies are backed by a caller-supplied allocator (pass an arena;
+//! free it in one shot).
 
 const std = @import("std");
 const http = @import("http.zig");
@@ -36,6 +35,12 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const video_gen = @import("providers/generated/video_gen.zig");
 const request_variant = @import("request_variant.zig");
+const middleware = @import("middleware.zig");
+const structs = @import("providers/generated/structs.zig");
+
+/// The submitted job: provider id, provider, model, and the `.raw()` opt-in
+/// (ADR-014). A caller resuming a job persists these fields.
+pub const VideoHandle = structs.VideoHandle;
 
 pub const ProviderName = providers.ProviderName;
 
@@ -53,6 +58,9 @@ pub const BuildError = error{UnsupportedVideoProvider} || std.mem.Allocator.Erro
 /// allocator (ADR-069 ZIG-005), so Parts live in a bounded array like `Image`'s.
 /// Slice 4 conditions on a single seed frame; the capacity is headroom.
 const max_image_parts = 8;
+
+/// Fixed capacity for `Video.text` Parts, for the same reason.
+const max_text_parts = 8;
 
 /// PixVerse requires all five submit fields; the generic surface is prompt-only,
 /// so duration/quality/aspect_ratio are sent as reference-anchored defaults
@@ -72,6 +80,9 @@ pub const Video = struct {
     output_uri_: ?[]const u8 = null,
     parts_: [max_image_parts]VideoInput = undefined,
     part_count_: usize = 0,
+    text_parts_: [max_text_parts][]const u8 = undefined,
+    text_part_count_: usize = 0,
+    raw_: bool = false,
 
     /// The video model id (ADR-021 bare-noun replacer). Carried in the body for
     /// the shared/qwen/pixverse shapes (as `model`) and Bedrock (as `modelId`);
@@ -85,7 +96,7 @@ pub const Video = struct {
     /// The caller destination S3 URI for output-uri delivery (Bedrock Nova Reel
     /// writes the mp4 to the caller's own bucket; ADR-021 bare-noun replacer).
     /// Ignored by every other shape.
-    pub fn outputUri(self: Video, uri: []const u8) Video {
+    pub fn outputURI(self: Video, uri: []const u8) Video {
         var s = self;
         s.output_uri_ = uri;
         return s;
@@ -104,6 +115,44 @@ pub const Video = struct {
         return s;
     }
 
+    /// Append a text Part (ADR-021 appender). Text Parts precede the
+    /// terminal's prompt; the submit body carries them and the prompt
+    /// newline-joined, skipping empty ones. Mirrors Rust `text(s)`.
+    pub fn text(self: Video, s_: []const u8) Video {
+        var s = self;
+        std.debug.assert(s.text_part_count_ < max_text_parts);
+        s.text_parts_[s.text_part_count_] = s_;
+        s.text_part_count_ += 1;
+        return s;
+    }
+
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`.
+    pub fn addMiddleware(self: Video, m: middleware.Middleware) Video {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
+    /// Opt in to `VideoResponse.raw` (ADR-014). `submit` records it on the
+    /// returned `VideoHandle.raw`, where the poll runtime reads it, as in Rust.
+    pub fn raw(self: Video) Video {
+        var s = self;
+        s.raw_ = true;
+        return s;
+    }
+
+    /// The prompt the submit body carries: the text Parts and then `prompt`,
+    /// newline-joined, skipping empty ones (Rust `join_prompt_text`). Without
+    /// text Parts it is `prompt`, unchanged.
+    fn promptText(self: *const Video, arena: std.mem.Allocator, prompt: []const u8) ![]const u8 {
+        if (self.text_part_count_ == 0) return prompt;
+        var texts: std.ArrayList([]const u8) = .empty;
+        for (self.text_parts_[0..self.text_part_count_]) |t| if (t.len > 0) try texts.append(arena, t);
+        if (prompt.len > 0) try texts.append(arena, prompt);
+        return std.mem.join(arena, "\n", texts.items);
+    }
+
     /// Build the video-generation SUBMIT request body as a dynamic JSON Value
     /// backed by `arena`, dispatched on the provider's generated `wire_shape`
     /// fact. `prompt` is the text-to-video prompt.
@@ -111,39 +160,35 @@ pub const Video = struct {
         const cfg = video_gen.videoGenConfig(self.provider) orelse
             return error.UnsupportedVideoProvider;
         const shape = cfg.wire_shape;
+        const prompt_text = try self.promptText(arena, prompt);
 
         if (std.mem.eql(u8, shape, "VideoQwen"))
-            return buildQwenBody(arena, self, prompt);
+            return buildQwenBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoPixVerse"))
-            return buildPixVerseBody(arena, self, prompt);
+            return buildPixVerseBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoVeo") or std.mem.eql(u8, shape, "VideoVertexVeo"))
-            return buildVeoBody(arena, prompt);
+            return buildVeoBody(arena, prompt_text);
         if (std.mem.eql(u8, shape, "VideoBedrock"))
-            return buildBedrockBody(arena, self, prompt);
+            return buildBedrockBody(arena, self, prompt_text);
         // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu.
-        return buildSharedBody(arena, self, prompt);
+        return buildSharedBody(arena, self, prompt_text);
     }
 
-    /// Submit a video-generation job and return the PROVIDER JOB ID.
+    /// Submit a video-generation job and return its `VideoHandle`: the provider
+    /// job id, the provider, the model, and the `.raw()` opt-in, the cross-SDK
+    /// handle value (ADR-014). Mirrors Rust `submit_video`.
     ///
     /// Video generation is asynchronous everywhere: the submit hop answers with a
     /// handle, and the finished mp4 arrives only after polling. This terminal is
-    /// the submit hop ONLY. **There is deliberately no `VideoHandle` type and no
-    /// poll/wait here** — video's poll adapter belongs to ADR-062 slice 2, which
-    /// puts video onto the shared `job.zig` engine together with the
-    /// `AsyncJobLifecycle` fact block and the video lifecycle-wire goldens,
-    /// across all seven SDKs. Returning a bare id says exactly what the SDK can
-    /// do today; a handle whose `poll` was unimplemented would claim more than
-    /// that and would then be replaced by slice 2 anyway.
-    ///
+    /// the submit hop ONLY; there is no poll/wait here yet (ADR-062 slice 2).
     /// Callers who need the finished asset today poll the provider's own
-    /// `poll_endpoint` with this id.
+    /// `poll_endpoint` with `handle.id`.
     pub fn submit(
         self: Video,
         arena: std.mem.Allocator,
         api_key: []const u8,
         prompt: []const u8,
-    ) ![]const u8 {
+    ) !VideoHandle {
         return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, prompt });
     }
 
@@ -160,7 +205,7 @@ pub const Video = struct {
         arena: std.mem.Allocator,
         api_key: []const u8,
         prompt: []const u8,
-    ) ![]const u8 {
+    ) !VideoHandle {
         const cfg = video_gen.videoGenConfig(self.provider) orelse
             return error.UnsupportedVideoProvider;
         // ADR-096: a seed frame selects the WithReferenceImages submit request;
@@ -176,7 +221,7 @@ pub const Video = struct {
         if (ctx.base_url == null and cfg.video_base_url.len > 0)
             ctx.base_url = cfg.video_base_url;
 
-        const raw = try send.postJson(transport, arena, .{
+        const reply = try send.postJson(transport, arena, .{
             .provider = self.provider,
             .ctx = &ctx,
             .api_key = api_key,
@@ -185,7 +230,12 @@ pub const Video = struct {
             .model = self.model_ orelse "",
         }, body);
 
-        return handleIdAt(arena, raw, cfg.submit_handle_field) orelse error.MissingVideoHandle;
+        return .{
+            .id = handleIdAt(arena, reply, cfg.submit_handle_field) orelse return error.MissingVideoHandle,
+            .provider = self.provider,
+            .raw = self.raw_,
+            .model = self.model_ orelse "",
+        };
     }
 };
 
@@ -312,6 +362,54 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
