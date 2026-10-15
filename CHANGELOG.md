@@ -142,11 +142,6 @@ These are not supported yet:
 - **Video generation is submit-only.** `video().submit` returns a handle with
   the provider's job id, but there is no poll/wait runtime, so a caller must
   poll the provider themselves.
-- **Streaming covers OpenAI-shape providers and Google, not Anthropic.**
-  Anthropic's stream is event-typed rather than data-only. Non-streaming
-  Anthropic requests are unaffected, as is streaming for the other providers.
-  Attempting to stream an event-typed provider returns
-  `error.UnsupportedWireShape` rather than silently returning empty text.
 
 Also not yet implemented: Google's `ResourceCaching` pre-hop (explicit
 `cache_control` caching works), the live `/models` catalogue send (the

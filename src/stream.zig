@@ -8,11 +8,10 @@
 //!   - `parseSseBuffer` (INBOUND): a full `text/event-stream` buffer -> the same
 //!     normalized `response.Response` the sync chat path yields, accumulating the
 //!     text deltas and reading the finish reason + usage from the generated
-//!     stream path facts. The response-wire `stream-{openai,google}` goldens
-//!     assert this projection. DATA-ONLY shapes (OpenAI-compat fleet + Google);
-//!     the event-typed Anthropic stream (`uses_event_types`) is deferred to a
-//!     later phase (mirrors the project-wide Anthropic-stream deferral in the
-//!     response-wire suite).
+//!     stream path facts. The response-wire `stream-{openai,google,anthropic}`
+//!     goldens assert this projection. Both SSE forms are read: data-only
+//!     (OpenAI-compat fleet + Google) and event-typed (`uses_event_types`,
+//!     Anthropic), where the `event:` name selects which facts a frame feeds.
 //!   - `stream` (the terminal): send the stream request through the injected
 //!     `Transport`, feed the response body to `parseSseBuffer` (delivering each
 //!     text delta to the caller's callback), and return the accumulated Response.
@@ -62,16 +61,25 @@ fn boolOrString(v: []const u8) json.Value {
 }
 
 /// Parse a full SSE (`text/event-stream`) buffer into the normalized chat
-/// Response. `on_chunk`, when non-null, receives each text delta in order. Only
-/// the DATA-ONLY assembly is implemented (OpenAI-compat fleet + Google); an
-/// `uses_event_types` provider (Anthropic) rejects with `UnsupportedWireShape`.
+/// Response. `on_chunk`, when non-null, receives each text delta in order.
 ///
-/// Assembly (data-only): each `data:` line is parsed as JSON (skipping the
-/// `[DONE]` sentinel); the delta text at `delta_text_path` is appended, the
-/// finish reason read from `stream_finish_reason_path` (filtering the Google
-/// `FINISH_REASON_UNSPECIFIED` sentinel), and the input/output token counts read
-/// from the usage paths — every path from the generated `StreamDef`. Strings are
-/// arena-backed. Mirrors Rust `prompt_stream`'s data-only branch.
+/// One loop serves both SSE forms; every choice comes from the generated
+/// `StreamDef` and the provider's `stream_finish_reason_path`, never from the
+/// provider name. Each `data:` line is parsed as JSON (the `done_signal`
+/// sentinel, e.g. `[DONE]`, ends the stream first).
+///   - Data-only (`uses_event_types == false`): every frame may carry the delta
+///     text, the finish reason and the usage counts.
+///   - Event-typed (`uses_event_types == true`): the preceding `event:` line
+///     names the frame. Only `content_event` frames feed text, only
+///     `usage_event` frames feed usage, and `done_event` ends the stream. Frames
+///     of any other type (Anthropic `ping`, `content_block_start`) are skipped.
+///     A `content_event` frame without `delta_text_path` (Anthropic
+///     `thinking_delta`, `signature_delta`) adds no text.
+/// The finish locator (ADR-013) is `event:json.path` or a bare `json.path`; an
+/// event prefix restricts it to frames of that event. The Google
+/// `FINISH_REASON_UNSPECIFIED` sentinel is filtered. A usage dimension no frame
+/// reports stays null (ADR-081). Strings are arena-backed. Mirrors Rust
+/// `prompt_stream`.
 pub fn parseSseBuffer(
     arena: std.mem.Allocator,
     provider: providers.ProviderName,
@@ -79,20 +87,21 @@ pub fn parseSseBuffer(
     on_chunk: ?ChunkCallback,
 ) !response.Response {
     const sd = stream_defs.streamConfig(provider) orelse return error.UnsupportedWireShape;
-    if (sd.uses_event_types) return error.UnsupportedWireShape;
-
-    // ADR-013: the finish path is `event_name:json.path`; a data-only provider
-    // carries no event prefix (no ':'), so the whole string is the JSON path.
-    const finish_path = finishJsonPath(providers.spec(provider).stream_finish_reason_path);
+    const finish = splitFinishPath(providers.spec(provider).stream_finish_reason_path);
 
     var content: std.ArrayList(u8) = .empty;
     var finish_reason: []const u8 = "";
-    var usage_input: i64 = 0;
-    var usage_output: i64 = 0;
+    var usage_input: ?i64 = null;
+    var usage_output: ?i64 = null;
+    var event: []const u8 = "";
 
     var it = std.mem.splitScalar(u8, sse, '\n');
     while (it.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
+        if (std.mem.startsWith(u8, line, "event:")) {
+            event = std.mem.trim(u8, line["event:".len..], " ");
+            continue;
+        }
         if (!std.mem.startsWith(u8, line, "data:")) continue;
         const payload = std.mem.trim(u8, line["data:".len..], " ");
         if (payload.len == 0) continue;
@@ -101,22 +110,35 @@ pub fn parseSseBuffer(
         // Leaky parse into the arena: every value is arena-backed, so a delta
         // string can be appended and a finish string referenced without a
         // per-line free (the whole arena is reclaimed at the end).
-        const value = std.json.parseFromSliceLeaky(json.Value, arena, payload, .{}) catch continue;
+        const parsed = std.json.parseFromSliceLeaky(json.Value, arena, payload, .{}) catch null;
+        const frame_event = event;
+        event = "";
 
-        if (json.getPath(value, sd.delta_text_path)) |v| if (v == .string) {
-            try content.appendSlice(arena, v.string);
-            if (on_chunk) |cb| if (v.string.len > 0) cb(v.string);
-        };
-
-        if (finish_path.len > 0) {
-            if (json.getPath(value, finish_path)) |v| if (v == .string) {
-                if (!std.mem.eql(u8, v.string, "FINISH_REASON_UNSPECIFIED"))
-                    finish_reason = v.string;
-            };
+        if (parsed) |value| {
+            if (finish.path.len > 0 and (finish.event.len == 0 or std.mem.eql(u8, finish.event, frame_event))) {
+                if (json.getPath(value, finish.path)) |v| if (v == .string) {
+                    if (v.string.len > 0 and !std.mem.eql(u8, v.string, "FINISH_REASON_UNSPECIFIED"))
+                        finish_reason = v.string;
+                };
+            }
         }
 
-        if (intAt(value, sd.usage_input_path)) |n| usage_input = n;
-        if (intAt(value, sd.usage_output_path)) |n| usage_output = n;
+        if (sd.uses_event_types and sd.done_event.len > 0 and std.mem.eql(u8, frame_event, sd.done_event)) break;
+
+        const value = parsed orelse continue;
+        const feeds_text = !sd.uses_event_types or std.mem.eql(u8, frame_event, sd.content_event);
+        const feeds_usage = !sd.uses_event_types or std.mem.eql(u8, frame_event, sd.usage_event);
+
+        if (feeds_text) {
+            if (json.getPath(value, sd.delta_text_path)) |v| if (v == .string) {
+                try content.appendSlice(arena, v.string);
+                if (on_chunk) |cb| if (v.string.len > 0) cb(v.string);
+            };
+        }
+        if (feeds_usage) {
+            if (intAt(value, sd.usage_input_path)) |n| usage_input = n;
+            if (intAt(value, sd.usage_output_path)) |n| usage_output = n;
+        }
     }
 
     return .{
@@ -129,11 +151,13 @@ pub fn parseSseBuffer(
     };
 }
 
-/// The JSON-path half of `stream_finish_reason_path` (`event:path` -> `path`);
-/// a data-only path has no ':' so it is returned whole.
-fn finishJsonPath(p: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, p, ':')) |i| return p[i + 1 ..];
-    return p;
+/// An ADR-013 stream-finish locator split into its optional event name and
+/// its JSON path: `event:path` -> (event, path); a bare `path` -> ("", path).
+const FinishPath = struct { event: []const u8, path: []const u8 };
+
+fn splitFinishPath(p: []const u8) FinishPath {
+    if (std.mem.indexOfScalar(u8, p, ':')) |i| return .{ .event = p[0..i], .path = p[i + 1 ..] };
+    return .{ .event = "", .path = p };
 }
 
 /// Read a non-null integer at a dotted path, or null when absent/non-numeric —
@@ -189,6 +213,35 @@ pub fn streamWith(
     );
     return parseSseBuffer(arena, cfg.provider, raw, on_chunk);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
