@@ -246,11 +246,11 @@ const resp = try client.transcription()
 std.debug.print("{s}\n", .{resp.text});
 ```
 
-Asynchronous providers (AssemblyAI) take a public audio URL and return a handle. `poll` makes one request and reports the job state; `wait` polls until the job finishes.
+Asynchronous providers (AssemblyAI) take a public audio URL, `.{ .url = ... }`, or local bytes, `.{ .bytes = audio }`, which are uploaded first. `submit` returns a handle. `poll` makes one request and reports the job state; `wait` polls until the job finishes.
 
 ```zig
 const handle = try client.transcription()
-    .submit(arena, key, "https://storage.example.com/meeting.mp3");
+    .submit(arena, key, .{ .url = "https://storage.example.com/meeting.mp3" });
 
 const st = try handle.wait(arena);
 switch (st.state) {

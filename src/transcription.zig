@@ -37,6 +37,22 @@ const providers = @import("providers/generated/providers.zig");
 const transcription_gen = @import("providers/generated/transcription_gen.zig");
 const response = @import("response.zig");
 const structs = @import("providers/generated/structs.zig");
+
+/// The audio an async `submit` transcribes. Mirrors the Go/Rust audio Part.
+pub const Audio = union(enum) {
+    /// A publicly fetchable audio URL.
+    url: []const u8,
+    /// Raw audio bytes. `submit` uploads them to the provider's upload
+    /// endpoint first and submits the URL it returns (STT-005).
+    bytes: []const u8,
+};
+
+/// The non-empty string at `path`, or null.
+fn stringField(v: json.Value, path: []const u8) ?[]const u8 {
+    const f = json.getPath(v, path) orelse return null;
+    if (f != .string or f.string.len == 0) return null;
+    return f.string;
+}
 const job = @import("job.zig");
 
 pub const ProviderName = providers.ProviderName;
@@ -104,9 +120,9 @@ pub const Transcription = struct {
 
     /// Build the ASYNC submit body (`json` encoding, AssemblyAI) — the flat
     /// `{audio_url}` the async submit terminal would POST. `audio_url` is a
-    /// public audio URL (the bytes-upload hop is the async runtime, a later
-    /// slice). Rejects a non-JSON provider (the wrong terminal for it). Mirrors
-    /// the `submit`-side body of Rust `submit_transcription`.
+    /// public audio URL, or the URL the upload hop returned for `Audio.bytes`.
+    /// Rejects a non-JSON provider (the wrong terminal for it). Mirrors the
+    /// `submit`-side body of Rust `submit_transcription`.
     pub fn buildSubmitBody(self: Transcription, arena: std.mem.Allocator, audio_url: []const u8) BuildError!json.Value {
         const cfg = transcription_gen.transcriptionConfig(self.provider) orelse
             return error.UnsupportedTranscriptionProvider;
@@ -191,51 +207,112 @@ pub const Transcription = struct {
 
     /// Submit audio for ASYNCHRONOUS transcription (`json` encoding, AssemblyAI)
     /// and return a `TranscriptionHandle` whose id is read from the config's
-    /// declared `submit_handle_field`. `audio_url` is a publicly fetchable audio
-    /// URL (the bytes-upload hop is not implemented). Poll the handle with
-    /// `poll`, or block with `wait`. Mirrors Go/Rust `Transcription.Submit`.
+    /// declared `submit_handle_field`. `audio` is a public URL, or raw bytes
+    /// that are first uploaded to the provider's upload endpoint (STT-005).
+    /// Poll the handle with `poll`, or block with `wait`. Mirrors Go/Rust
+    /// `Transcription.Submit`.
     pub fn submit(
         self: Transcription,
         arena: std.mem.Allocator,
         api_key: []const u8,
-        audio_url: []const u8,
+        audio: Audio,
     ) !TranscriptionHandle {
-        return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, audio_url });
+        return send.withTransport(&self.ctx, @TypeOf(self).submitWith, self, .{ arena, api_key, audio });
     }
 
     /// `submit` over an injected transport (the seam tests mock).
     ///
-    /// Middleware: fires `transcription` around the OUTBOUND submit only
-    /// (BUG-036), mirroring `video_generation` / `batch_submit`. Polling a
-    /// submitted job reads state and does not fire.
+    /// Middleware: ONE `transcription` event spans the outbound hops, the
+    /// upload (for `Audio.bytes`) and the submit (BUG-036), as in Go and Rust:
+    /// a pre-phase veto stops the upload. Polling a submitted job reads state
+    /// and does not fire.
     pub fn submitWith(
         self: Transcription,
         transport: http.Transport,
         arena: std.mem.Allocator,
         api_key: []const u8,
-        audio_url: []const u8,
+        audio: Audio,
     ) !TranscriptionHandle {
         const cfg = transcription_gen.transcriptionConfig(self.provider) orelse
             return error.UnsupportedTranscriptionProvider;
-        const body = try self.buildSubmitBody(arena, audio_url);
+        // Pre-flight, from config, before any middleware fires: the wrong
+        // terminal for a multipart provider, and bytes for a URL-only one.
+        if (!std.mem.eql(u8, cfg.request_encoding, "json")) return error.WrongEncoding;
+        if (audio == .bytes and cfg.upload_endpoint.len == 0) return error.AudioBytesUnsupported;
 
-        const raw = try send.postJson(transport, arena, .{
+        const args = send.Args{
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
             .endpoint = cfg.submit_endpoint,
             .op = .transcription,
             .model = self.model_ orelse "",
-        }, body);
-
-        const id = json.getPath(raw, cfg.submit_handle_field) orelse
-            return error.MissingTranscriptionHandle;
-        if (id != .string or id.string.len == 0) return error.MissingTranscriptionHandle;
+        };
+        try send.firePre(args);
+        const id = self.uploadAndSubmit(transport, arena, api_key, cfg, audio) catch |err| {
+            send.firePostOutcome(args, switch (err) {
+                error.Timeout => .{ .transport = "timeout" },
+                error.ApiError => .{ .api = .{
+                    .provider = @tagName(self.provider),
+                    .status_code = 0,
+                    .message = "provider returned a non-2xx status",
+                } },
+                else => .{ .decoding = "could not read the provider reply" },
+            });
+            return err;
+        };
+        send.firePostOutcome(args, null);
         return .{
-            .value = .{ .id = try arena.dupe(u8, id.string), .provider = self.provider },
+            .value = .{ .id = id, .provider = self.provider },
             .ctx = self.ctx,
             .api_key = api_key,
         };
+    }
+
+    /// The outbound hops of `submitWith`, unobserved: the upload (bytes only)
+    /// that yields `upload_url`, then the `{audio_url}` submit. Returns the job id.
+    fn uploadAndSubmit(
+        self: Transcription,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        cfg: transcription_gen.TranscriptionDef,
+        audio: Audio,
+    ) ![]const u8 {
+        const audio_url = switch (audio) {
+            .url => |u| u,
+            .bytes => |data| blk: {
+                const up = try self.post(transport, arena, api_key, cfg.upload_endpoint, data, "application/octet-stream");
+                break :blk stringField(up, "upload_url") orelse return error.MissingUploadUrl;
+            },
+        };
+        const body = try json.stringify(arena, try self.buildSubmitBody(arena, audio_url));
+        const reply = try self.post(transport, arena, api_key, cfg.submit_endpoint, body, "application/json");
+        const id = stringField(reply, cfg.submit_handle_field) orelse return error.MissingTranscriptionHandle;
+        return arena.dupe(u8, id);
+    }
+
+    /// POST one hop without middleware and parse the JSON reply.
+    fn post(
+        self: Transcription,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        endpoint: []const u8,
+        body: []const u8,
+        content_type: []const u8,
+    ) !json.Value {
+        const resp = try send.sendUnobserved(transport, arena, .{
+            .provider = self.provider,
+            .ctx = &self.ctx,
+            .api_key = api_key,
+            .endpoint = endpoint,
+            .method = .POST,
+            .body = body,
+            .content_type = content_type,
+        });
+        if (resp.status < 200 or resp.status >= 300) return error.ApiError;
+        return std.json.parseFromSliceLeaky(json.Value, arena, resp.body, .{}) catch error.InvalidTranscriptionResponse;
     }
 };
 
@@ -795,6 +872,66 @@ fn testHandle(gpa: std.mem.Allocator, transport: http.Transport) TranscriptionHa
         .api_key = "aai-key",
     };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

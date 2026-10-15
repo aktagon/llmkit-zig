@@ -65,7 +65,8 @@ First release.
   `error.PollTimeout` after 10 minutes. On success the result holds the
   finished video: bytes for Google Veo and Vertex Veo, a URL for the other
   providers, and the S3 URI for Bedrock.
-- **Asynchronous transcription jobs.** `transcription().submit` returns a
+- **Asynchronous transcription jobs.** `transcription().submit` takes a public
+  URL or audio bytes, which it uploads first, and returns a
   `TranscriptionHandle`. `handle.poll` makes one request and returns the job
   state; `handle.wait` polls until the job succeeds or fails, and gives up with
   `error.PollTimeout` after 10 minutes. A provider failure is a `.failed` state
@@ -166,6 +167,3 @@ These are not supported yet:
 
 - **Streaming with `protocol(.responses)`** returns empty text: Responses
   stream events are not read yet.
-
-Also not yet implemented: the upload hop for asynchronous transcription (submit
-takes a public audio URL).
