@@ -13,6 +13,7 @@ pub const inline_parts = "InlineParts";
 pub const json_generations_openai = "JSONGenerationsOpenAI";
 pub const multipart_form = "MultipartForm";
 pub const json_inline_refs = "JSONInlineRefs";
+/// Deprecated: no provider accepts this since 2026-10-15 (Vertex Imagen shut down, BUG-101); removed at the next major.
 pub const json_predict = "JSONPredict";
 pub const json_generations = "JSONGenerations";
 
@@ -237,42 +238,6 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .model_id = "recraftv3_vector",
                     .label = "Recraft V3 (vector / SVG)",
                     .aspect_ratios = &.{},
-                    .image_sizes = &.{},
-                    .max_input_images = 0,
-                    .supports_image_input = false,
-                },
-            },
-        },
-        .vertex => .{
-            .output_mode = "Base64Inline",
-            .response_shape = "VertexPredictions",
-            .usage_input_path = "",
-            .usage_output_path = "",
-            .usage_reasoning_path = "",
-            .variants = &.{
-                .{ .carries = "TextOnly", .shape = "JSONPredict", .endpoint = "" },
-            },
-            .models = &.{
-                .{
-                    .model_id = "imagen-3.0-fast-generate-001",
-                    .label = "Imagen 3 Fast",
-                    .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
-                    .image_sizes = &.{},
-                    .max_input_images = 0,
-                    .supports_image_input = false,
-                },
-                .{
-                    .model_id = "imagen-3.0-generate-002",
-                    .label = "Imagen 3",
-                    .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
-                    .image_sizes = &.{},
-                    .max_input_images = 0,
-                    .supports_image_input = false,
-                },
-                .{
-                    .model_id = "imagen-4.0-generate-preview-06-06",
-                    .label = "Imagen 4 Preview",
-                    .aspect_ratios = &.{ "16:9", "1:1", "3:4", "4:3", "9:16" },
                     .image_sizes = &.{},
                     .max_input_images = 0,
                     .supports_image_input = false,
