@@ -67,6 +67,18 @@ pub const Agent = struct {
     tool_count_: usize = 0,
     history_: []const Message = &.{},
     max_tool_iterations_: usize = 10,
+    max_tokens_: ?i64 = null,
+    temperature_: ?f64 = null,
+    top_p_: ?f64 = null,
+    top_k_: ?i64 = null,
+    frequency_penalty_: ?f64 = null,
+    presence_penalty_: ?f64 = null,
+    reasoning_effort_: ?[]const u8 = null,
+    seed_: ?i64 = null,
+    stop_sequences_: ?[]const []const u8 = null,
+    thinking_budget_: ?i64 = null,
+    safety_settings_: []const request.SafetySetting = &.{},
+    raw_: bool = false,
 
     pub fn model(self: Agent, m: []const u8) Agent {
         var s = self;
@@ -115,6 +127,95 @@ pub const Agent = struct {
         return s;
     }
 
+    // Generation options (ADR-024). Each lands in the same `request.ChatConfig`
+    // field `Text` sets, so the agent body goes through the one option-placement
+    // path in `request.buildChatBody`.
+
+    pub fn maxTokens(self: Agent, n: i64) Agent {
+        var s = self;
+        s.max_tokens_ = n;
+        return s;
+    }
+
+    pub fn temperature(self: Agent, t: f64) Agent {
+        var s = self;
+        s.temperature_ = t;
+        return s;
+    }
+
+    pub fn topP(self: Agent, p: f64) Agent {
+        var s = self;
+        s.top_p_ = p;
+        return s;
+    }
+
+    pub fn topK(self: Agent, k: i64) Agent {
+        var s = self;
+        s.top_k_ = k;
+        return s;
+    }
+
+    pub fn frequencyPenalty(self: Agent, v: f64) Agent {
+        var s = self;
+        s.frequency_penalty_ = v;
+        return s;
+    }
+
+    pub fn presencePenalty(self: Agent, v: f64) Agent {
+        var s = self;
+        s.presence_penalty_ = v;
+        return s;
+    }
+
+    pub fn reasoningEffort(self: Agent, v: []const u8) Agent {
+        var s = self;
+        s.reasoning_effort_ = v;
+        return s;
+    }
+
+    pub fn seed(self: Agent, v: i64) Agent {
+        var s = self;
+        s.seed_ = v;
+        return s;
+    }
+
+    /// `v` is caller-owned and must outlive the terminal.
+    pub fn stopSequences(self: Agent, v: []const []const u8) Agent {
+        var s = self;
+        s.stop_sequences_ = v;
+        return s;
+    }
+
+    pub fn thinkingBudget(self: Agent, v: i64) Agent {
+        var s = self;
+        s.thinking_budget_ = v;
+        return s;
+    }
+
+    /// Google safety settings, emitted only on the Google wire shape.
+    /// `settings` is caller-owned and must outlive the terminal.
+    pub fn safetySettings(self: Agent, settings: []const request.SafetySetting) Agent {
+        var s = self;
+        s.safety_settings_ = settings;
+        return s;
+    }
+
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`. It sees the `llm_request` and `tool_call` events.
+    pub fn addMiddleware(self: Agent, m: middleware.Middleware) Agent {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
+    /// Opt in to `Response.raw` (ADR-014): `chat` sets it to the parsed body of
+    /// the final reply, the turn that called no tool. Mirrors Rust `raw()`.
+    pub fn raw(self: Agent) Agent {
+        var s = self;
+        s.raw_ = true;
+        return s;
+    }
+
     fn chatConfig(self: *const Agent, prompt: []const u8) request.ChatConfig {
         return .{
             .provider = self.provider,
@@ -122,6 +223,17 @@ pub const Agent = struct {
             .system = self.system_,
             .prompt = prompt,
             .caching = self.caching_,
+            .max_tokens = self.max_tokens_,
+            .temperature = self.temperature_,
+            .top_p = self.top_p_,
+            .top_k = self.top_k_,
+            .frequency_penalty = self.frequency_penalty_,
+            .presence_penalty = self.presence_penalty_,
+            .reasoning_effort = self.reasoning_effort_,
+            .seed = self.seed_,
+            .stop_sequences = self.stop_sequences_,
+            .thinking_budget = self.thinking_budget_,
+            .safety_settings = self.safety_settings_,
         };
     }
 
@@ -200,6 +312,7 @@ pub const Agent = struct {
             const calls = try messages.extractToolCalls(arena, reply.value, self.provider, shape);
             if (calls.len == 0) {
                 resp.usage = total.?;
+                if (self.raw_) resp.raw = reply.value;
                 return resp;
             }
             try turns.append(arena, .{
@@ -478,6 +591,53 @@ const openai_call_reply =
 const openai_final_reply =
     \\{"choices":[{"message":{"role":"assistant","content":"It is 12C in Oslo."},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":6}}
 ;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
