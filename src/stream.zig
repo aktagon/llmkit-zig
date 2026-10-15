@@ -43,7 +43,9 @@ pub const ChunkCallback = *const fn (chunk: []const u8) void;
 pub fn buildStreamBody(arena: std.mem.Allocator, cfg: request.ChatConfig) request.BuildError!json.Value {
     var body = try request.buildChatBody(arena, cfg);
     const shape = try request.resolveWireShape(providers.spec(cfg.provider), cfg.protocol);
-    const sd = (StreamSettings.select(cfg.provider, shape) orelse return body).def;
+    // No stream config (Bedrock) is an error here, before anything is sent:
+    // a plain chat body would go out as a billable non-stream request.
+    const sd = (StreamSettings.select(cfg.provider, shape) orelse return error.UnsupportedWireShape).def;
 
     if (sd.param.len > 0)
         try json.set(arena, &body, sd.param, boolOrString(sd.param_value));
@@ -242,6 +244,29 @@ pub fn streamWith(
     send.firePostUsage(args, resp.usage.input, resp.usage.output);
     return resp;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
