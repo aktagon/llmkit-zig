@@ -55,7 +55,8 @@ pub const ApiError = struct {
 };
 
 /// The normalized chat reply. `usage` MUST keep this name — the naming lint
-/// keys on it. `raw` is always null until the `.raw()` opt-in lands (BUG-073).
+/// keys on it. `raw` is set by the SEND seam when the builder opted in with
+/// `.raw()` (ADR-014); the codec itself always leaves it null.
 /// `provider_turn` is populated by the SEND seam, not by `decodeResponse`: the
 /// codec is Value-typed (ADR-069 ZIG-002) and a parsed tree has no memory of the
 /// source text, so the bytes are sliced where they still exist (ADR-085).
