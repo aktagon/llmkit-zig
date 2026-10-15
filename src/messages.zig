@@ -132,7 +132,21 @@ pub fn appendFlatHistory(
     provider: providers.ProviderName,
     shape: []const u8,
 ) !void {
+    const bedrock = std.mem.eql(u8, shape, "ChatBedrock");
+    var prev_result = false;
     for (msgs) |m| {
+        const is_result = m == .result;
+        defer prev_result = is_result;
+        // Converse wants every toolResult answering one assistant turn inside
+        // ONE user message; one message per result is a 400 (live,
+        // 2026-10-15). A result that follows a result joins the message the
+        // first one opened.
+        if (bedrock and is_result and prev_result) {
+            const entry = try toolResultEntry(arena, m.result, provider, shape);
+            const open = &out.array.items[out.array.items.len - 1];
+            try open.object.getPtr("content").?.array.appendSlice(entry.object.get("content").?.array.items);
+            continue;
+        }
         if (m == .turn and try appendReplayedTurn(arena, out, m.turn, provider, shape)) continue;
         try appendProjected(arena, out, m, provider, shape);
     }
