@@ -183,15 +183,23 @@ pub const Agent = struct {
             if (self.tool_count_ > 0)
                 try applyToolDefs(arena, &body, self.provider, self.tools_[0..self.tool_count_]);
 
-            const reply = try send.postJsonWithText(transport, arena, .{
+            const args = send.Args{
                 .provider = self.provider,
                 .ctx = &self.ctx,
                 .api_key = api_key,
                 .endpoint = try request.chatEndpoint(arena, cfg),
                 .op = .llm_request,
                 .model = model_id,
-            }, body);
-            var resp = (try response.decodeResponse(arena, self.provider, shape, reply.value)).response;
+                .post = .by_caller,
+            };
+            const reply = try send.postJsonWithText(transport, arena, args, body);
+            var resp = (response.decodeResponse(arena, self.provider, shape, reply.value) catch |err| {
+                send.firePostDecodeError(args);
+                return err;
+            }).response;
+            // Per-TURN usage, not the running total: a middleware observing one
+            // request sees what that request consumed (Rust parity).
+            send.firePostUsage(args, resp.usage.input, resp.usage.output);
             // ADR-085: capture the turn from the reply BYTES (see client.zig);
             // the next round replays it.
             resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);

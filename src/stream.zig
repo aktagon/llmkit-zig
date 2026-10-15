@@ -25,6 +25,7 @@ const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
+const telemetry = @import("telemetry.zig");
 const providers = @import("providers/generated/providers.zig");
 const stream_defs = @import("providers/generated/stream.zig");
 
@@ -172,23 +173,56 @@ pub fn streamWith(
         try http.substituteModel(arena, stream_endpoint, model)
     else
         try request.chatEndpoint(arena, cfg);
-    const raw = try send.postRaw(
-        transport,
-        arena,
-        .{
-            .provider = cfg.provider,
-            .ctx = ctx,
-            .api_key = api_key,
-            .endpoint = endpoint,
-            .extra_headers = try request.buildRequestHeaders(arena, cfg),
-            .op = .llm_request,
-            .model = model,
-        },
-        try json.stringify(arena, body),
-        "application/json",
-    );
-    return parseSseBuffer(arena, cfg.provider, raw, on_chunk);
+    const args = send.Args{
+        .provider = cfg.provider,
+        .ctx = ctx,
+        .api_key = api_key,
+        .endpoint = endpoint,
+        .extra_headers = try request.buildRequestHeaders(arena, cfg),
+        .op = .llm_request,
+        .model = model,
+        .post = .by_caller,
+    };
+    const raw = try send.postRaw(transport, arena, args, try json.stringify(arena, body), "application/json");
+    const resp = parseSseBuffer(arena, cfg.provider, raw, on_chunk) catch |err| {
+        send.firePostDecodeError(args);
+        return err;
+    };
+    // The post event carries the streamed usage frame (Go parity).
+    send.firePostUsage(args, resp.usage.input, resp.usage.output);
+    return resp;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
