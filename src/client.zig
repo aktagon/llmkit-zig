@@ -168,9 +168,9 @@ pub const Client = struct {
 
     /// Enter the model-catalogue builder (ADR-019). `list`/`get` walk the
     /// compiled-in catalogue; `provider(p)` scopes to one provider's live
-    /// `/models` request-assembly seam. Carries the client's base-URL override.
+    /// `/models` endpoint. Carries the client's send context.
     pub fn models(self: Client) models_mod.Models {
-        return .{ .base_url = self.ctx.base_url };
+        return .{ .ctx = self.ctx };
     }
 
     /// Enter the providers-namespace builder (ADR-019). `list()` returns the

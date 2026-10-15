@@ -297,6 +297,15 @@ if (client.models().get("claude-sonnet-4-6")) |m| {
 }
 ```
 
+`provider(p).list` asks the provider's `/models` endpoint for what your key can use, following pagination to the last page. `provider(p).get` fetches one model. Each result carries the capabilities llmkit knows for that id; `raw()` keeps the provider's record on `m.raw`.
+
+```zig
+const live = try client.models().provider(.openai).list(arena, api_key);
+std.debug.print("{d} models available to this key\n", .{live.len});
+```
+
+A 403 for a key without the models scope returns `error.Scope`; any other failure returns `error.Unavailable`.
+
 ### Capability query
 
 ```zig
