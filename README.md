@@ -192,7 +192,7 @@ Add `.image(mime, bytes)` to send a reference image (an edit) on providers that 
 
 ```zig
 const resp = try client.music()
-    .addLyrics("[verse]\nRain on the window")
+    .lyrics("[verse]\nRain on the window")
     .generate(arena, key, "A slow piano ballad");
 
 for (resp.audio) |clip| {
