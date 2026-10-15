@@ -66,6 +66,10 @@ First release.
   `safetySettings`; `Music` gains `text` and `lyrics`; `Video` gains `text`
   and `outputURI`, and `submit` returns a `VideoHandle`. `Upload` takes its
   content from `bytes(data)` or `path(p)`, with `mimeType(m)`.
+- **Google cache resources.** With `caching()` on, a Google request first
+  creates a `cachedContents` resource holding the system prompt, then sends the
+  request with a reference to it. Each creation fires `cache_create` middleware
+  events.
 - `batch_slot_missing` and `batch_slot_error`: the finish reasons of a batch
   slot with no result, and of a failed slot the provider gave no reason for.
   Compare against them instead of typing the strings.
@@ -146,7 +150,6 @@ These are not supported yet:
   the provider's job id, but there is no poll/wait runtime, so a caller must
   poll the provider themselves.
 
-Also not yet implemented: Google's `ResourceCaching` pre-hop (explicit
-`cache_control` caching works), the live `/models` catalogue send (the
-compiled-in catalogue and request assembly work), and polling asynchronous
-transcription jobs.
+Also not yet implemented: the live `/models` catalogue send (the compiled-in
+catalogue and request assembly work), and polling asynchronous transcription
+jobs.

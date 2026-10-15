@@ -33,6 +33,7 @@ const request_defs = @import("providers/generated/request_defs.zig");
 const structs = @import("providers/generated/structs.zig");
 const messages = @import("messages.zig");
 const middleware = @import("middleware.zig");
+const caching_mod = @import("caching.zig");
 
 pub const Message = structs.Message;
 pub const ToolCall = structs.ToolCall;
@@ -294,6 +295,9 @@ pub const Agent = struct {
             var body = try request.buildChatBody(arena, cfg);
             if (self.tool_count_ > 0)
                 try applyToolDefs(arena, &body, self.provider, self.tools_[0..self.tool_count_]);
+            // Each round's body carries the system prompt, so each round
+            // creates its cache, as in Go/Rust.
+            if (self.caching_) try caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body);
 
             const reply = try send.postJsonWithText(transport, arena, .{
                 .provider = self.provider,
@@ -591,6 +595,48 @@ const openai_call_reply =
 const openai_final_reply =
     \\{"choices":[{"message":{"role":"assistant","content":"It is 12C in Oslo."},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":6}}
 ;
+
+/// Counts the cache_create events an agent fires.
+const CacheHook = struct {
+    pre: usize = 0,
+    post: usize = 0,
+
+    fn call(ptr: *anyopaque, ev: *const middleware.Event) ?[]const u8 {
+        const self: *CacheHook = @ptrCast(@alignCast(ptr));
+        if (ev.op != .cache_create) return null;
+        if (ev.phase == .pre) self.pre += 1 else self.post += 1;
+        return null;
+    }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

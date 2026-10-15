@@ -10,9 +10,10 @@
 //!     is rewritten into a `[{type:"text", text, cache_control}]` array (the
 //!     caching-{text,agent,batch}-anthropic goldens).
 //!   - AutomaticCaching (OpenAI): no-op (the provider caches server-side).
-//!   - ResourceCaching (Google): a `cachedContents` network pre-hop — deferred
-//!     (needs a send before the main request; no wire fixture gates it, and the
-//!     text-path wire suite asserts the request body only).
+//!   - ResourceCaching (Google): a `cachedContents` network pre-hop. It needs a
+//!     send, so it cannot live in the pure `buildChatBody`; every terminal that
+//!     sends a chat body calls `applyResourceCaching` on it before the send
+//!     (the caching-create-google golden locks the create body).
 //! Mirrors Rust `apply_caching` / Go `applyCaching`.
 
 const std = @import("std");
@@ -20,6 +21,8 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const caching_defs = @import("providers/generated/caching.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
+const http = @import("http.zig");
+const send = @import("send.zig");
 
 /// Apply prompt caching to a built chat `body` in place, dispatching on the
 /// provider's generated `CachingMode`. A no-op for providers without a caching
@@ -29,8 +32,59 @@ pub fn applyCaching(arena: std.mem.Allocator, body: *json.Value, provider: provi
     switch (cfg.mode) {
         .explicit_caching => try applyExplicit(arena, body, provider, cfg.control_type),
         .automatic_caching => {},
-        .resource_caching => {}, // Google network pre-hop — deferred (not wire-gated).
+        .resource_caching => {}, // a network pre-hop: see applyResourceCaching.
     }
+}
+
+/// ResourceCaching: create a provider-side cache holding the system prompt and
+/// point `body` at it. POSTs `{model, ttl, contents, systemInstruction}` to the
+/// lifecycle's create endpoint, reads the resource id at `response_id_path`,
+/// sets it at `reference_field`, and drops `system_instruction` from `body`.
+/// A no-op for any other caching mode and for a body with no system prompt.
+/// `model` is the effective model id. Mirrors Rust `apply_resource_caching`.
+pub fn applyResourceCaching(
+    transport: http.Transport,
+    arena: std.mem.Allocator,
+    ctx: *const http.Ctx,
+    provider: providers.ProviderName,
+    api_key: []const u8,
+    model: []const u8,
+    body: *json.Value,
+) !void {
+    const cfg = caching_defs.cachingConfig(provider) orelse return;
+    if (cfg.mode != .resource_caching) return;
+    const lc = cfg.lifecycle orelse return error.UnsupportedWireShape;
+    const system_instruction = body.object.get("system_instruction") orelse return;
+
+    var part = json.object();
+    try json.set(arena, &part, "text", .{ .string = "cache" });
+    var parts = json.array(arena);
+    try parts.array.append(part);
+    var turn = json.object();
+    try json.set(arena, &turn, "role", .{ .string = "user" });
+    try json.set(arena, &turn, "parts", parts);
+    var contents = json.array(arena);
+    try contents.array.append(turn);
+
+    var create = json.object();
+    try json.set(arena, &create, "model", .{ .string = try std.fmt.allocPrint(arena, "models/{s}", .{model}) });
+    try json.set(arena, &create, "ttl", .{ .string = try std.fmt.allocPrint(arena, "{s}s", .{cfg.default_ttl}) });
+    try json.set(arena, &create, "contents", contents);
+    try json.set(arena, &create, "systemInstruction", system_instruction);
+
+    const reply = try send.postJson(transport, arena, .{
+        .provider = provider,
+        .ctx = ctx,
+        .api_key = api_key,
+        .endpoint = lc.create_endpoint,
+        .op = .cache_create,
+        .model = model,
+    }, create);
+
+    const id = json.getPath(reply, lc.response_id_path) orelse return error.ApiError;
+    if (id != .string or id.string.len == 0) return error.ApiError;
+    try json.set(arena, body, lc.reference_field, .{ .string = id.string });
+    _ = body.object.orderedRemove("system_instruction");
 }
 
 /// ExplicitCaching: annotate the system block with `cache_control`. Placement is
@@ -61,6 +115,40 @@ fn applyExplicit(arena: std.mem.Allocator, body: *json.Value, provider: provider
         .message_in_array, .sibling_object => {},
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

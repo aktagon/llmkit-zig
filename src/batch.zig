@@ -32,6 +32,7 @@ const request = @import("request.zig");
 const response = @import("response.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
+const caching_mod = @import("caching.zig");
 const job = @import("job.zig");
 const providers = @import("providers/generated/providers.zig");
 const batch_defs = @import("providers/generated/batch.zig");
@@ -92,6 +93,28 @@ pub fn buildBatchBody(
     try json.set(arena, &payload, wrapper, items);
 
     return .{ .payload = payload, .beta_headers = try betas.toOwnedSlice(arena) };
+}
+
+/// Run the resource-caching pre-hop on every item body of a built payload, so
+/// the batch path caches like text/agent/stream (Go/Rust apply it per item).
+/// A no-op unless the provider uses ResourceCaching.
+pub fn applyResourceCaching(
+    transport: http.Transport,
+    arena: std.mem.Allocator,
+    ctx: *const http.Ctx,
+    provider: providers.ProviderName,
+    api_key: []const u8,
+    model: []const u8,
+    payload: *json.Value,
+) !void {
+    const bd = batch_defs.batchConfig(provider) orelse return;
+    const wrapper = if (bd.request_wrapper.len > 0) bd.request_wrapper else "requests";
+    const field = if (bd.item_body_field.len > 0) bd.item_body_field else "params";
+    const items = payload.object.getPtr(wrapper) orelse return;
+    for (items.array.items) |*item| {
+        const item_body = item.object.getPtr(field) orelse continue;
+        try caching_mod.applyResourceCaching(transport, arena, ctx, provider, api_key, model, item_body);
+    }
 }
 
 /// Append `value` to `list` if not already present (dedup by value).
