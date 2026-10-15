@@ -38,6 +38,8 @@ const image_gen = @import("providers/generated/image_gen.zig");
 const request_variant = @import("request_variant.zig");
 const response = @import("response.zig");
 const structs = @import("providers/generated/structs.zig");
+const request = @import("request.zig");
+const middleware = @import("middleware.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -48,6 +50,17 @@ pub const ImageInput = struct {
     mime: []const u8,
     bytes: []const u8,
 };
+
+/// One input Part, in caller order: a reference image or a text Part. Google
+/// sends them interleaved as given; the other shapes join the text Parts into
+/// the prompt and send the images by themselves (Rust `Part`).
+pub const ImagePart = union(enum) {
+    image: ImageInput,
+    text: []const u8,
+};
+
+/// Google safety setting `{category, threshold}` (the text path's type).
+pub const SafetySetting = request.SafetySetting;
 
 /// One decoded output image. `bytes` is RAW (already base64-decoded from the
 /// wire); `mime_type` is the provider's echoed media type (defaulting to
@@ -78,11 +91,21 @@ pub const ParseError = error{UnsupportedImageProvider} || std.mem.Allocator.Erro
 /// Pre-flight rejections. Zig error sets carry no payload, so each names the
 /// KIND where the other SDKs return `ValidationError{Field, Message}`
 /// (ADR-076 §3); all four correspond to field "model" or "parts".
-pub const ValidationError = error{ UnknownImageModel, ImageInputUnsupported, TooManyImageParts } || request_variant.Error;
+/// `MaskUnsupported`, `SafetyFilterUnsupported` and `SafetySettingsUnsupported`
+/// name a knob the selected request shape has no field for (Rust rejects these
+/// with `ValidationError{field: "mask" | "safety_filter" | "safety_settings"}`).
+pub const ValidationError = error{
+    UnknownImageModel,
+    ImageInputUnsupported,
+    TooManyImageParts,
+    MaskUnsupported,
+    SafetyFilterUnsupported,
+    SafetySettingsUnsupported,
+} || request_variant.Error;
 
-/// Fixed capacity for reference-image Parts (edit / compositional generation).
-/// Image chain methods take no allocator (ADR-069 ZIG-005), so Parts live in a
-/// bounded array like `Text`'s media Parts.
+/// Fixed capacity for input Parts, image and text together (edit /
+/// compositional generation). Image chain methods take no allocator (ADR-069
+/// ZIG-005), so Parts live in a bounded array like `Text`'s media Parts.
 const max_image_parts = 8;
 
 /// The public Image builder. Immutable value type: each chain method returns a
@@ -99,10 +122,16 @@ pub const Image = struct {
     output_format_: ?[]const u8 = null,
     background_: ?[]const u8 = null,
     count_: ?i64 = null,
-    parts_: [max_image_parts]ImageInput = undefined,
+    parts_: [max_image_parts]ImagePart = undefined,
     part_count_: usize = 0,
-    /// Set when `image` is called with `parts_` full; the terminal rejects it.
+    image_count_: usize = 0,
+    /// Set when `image` or `text` is called with `parts_` full; the terminal
+    /// rejects it.
     parts_overflow_: bool = false,
+    mask_: ?ImageInput = null,
+    safety_filter_: ?[]const u8 = null,
+    safety_settings_: []const SafetySetting = &.{},
+    raw_: bool = false,
 
     /// The image model id (ADR-021 bare-noun replacer). Carried in the body for
     /// the OpenAI/Recraft flat shapes; omitted for Google (model is in the URL).
@@ -168,19 +197,93 @@ pub const Image = struct {
     /// A part past `max_image_parts` is not stored; `generate` then returns
     /// `error.TooManyImageParts`.
     pub fn image(self: Image, mime: []const u8, bytes: []const u8) Image {
+        var s = self.appendPart(.{ .image = .{ .mime = mime, .bytes = bytes } });
+        if (!s.parts_overflow_) s.image_count_ += 1;
+        return s;
+    }
+
+    /// Append a text input Part (ADR-021 appender). Text Parts precede the
+    /// terminal's prompt, in caller order: Google sends each as its own
+    /// `{text}` part, and the other shapes newline-join them with the prompt.
+    /// Mirrors Rust `text(s)`.
+    pub fn text(self: Image, s_: []const u8) Image {
+        return self.appendPart(.{ .text = s_ });
+    }
+
+    fn appendPart(self: Image, part: ImagePart) Image {
         var s = self;
         if (s.part_count_ == max_image_parts) {
             s.parts_overflow_ = true;
             return s;
         }
-        s.parts_[s.part_count_] = .{ .mime = mime, .bytes = bytes };
+        s.parts_[s.part_count_] = part;
         s.part_count_ += 1;
         return s;
     }
 
-    /// The config's request variant for the parts this builder holds (ADR-096).
+    /// Inpainting mask: transparent pixels mark the region to edit. `bytes` is
+    /// RAW. Sent only by the OpenAI edit request (multipart, with at least one
+    /// reference image); `generate` rejects it for any other request shape.
+    /// Mirrors Rust `mask(mime, data)`.
+    pub fn mask(self: Image, mime: []const u8, bytes: []const u8) Image {
+        var s = self;
+        s.mask_ = .{ .mime = mime, .bytes = bytes };
+        return s;
+    }
+
+    /// Vertex Imagen safety filter threshold (`parameters.safetySetting`, e.g.
+    /// "block_medium_and_above"). Only the Vertex predict shape has the field;
+    /// `generate` rejects it elsewhere. Mirrors Rust `safety_filter`.
+    pub fn safetyFilter(self: Image, threshold: []const u8) Image {
+        var s = self;
+        s.safety_filter_ = threshold;
+        return s;
+    }
+
+    /// Google per-category safety thresholds: a top-level `safetySettings`
+    /// array, as on the text path. Only the Google shape has the field;
+    /// `generate` rejects it elsewhere. `settings` is caller-owned and must
+    /// outlive the terminal. Mirrors Rust `safety_settings`.
+    pub fn safetySettings(self: Image, settings: []const SafetySetting) Image {
+        var s = self;
+        s.safety_settings_ = settings;
+        return s;
+    }
+
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`.
+    pub fn addMiddleware(self: Image, m: middleware.Middleware) Image {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
+    /// Opt in to `ImageResponse.raw` (ADR-014): `generate` sets it to the
+    /// parsed provider reply body. Null without this call.
+    pub fn raw(self: Image) Image {
+        var s = self;
+        s.raw_ = true;
+        return s;
+    }
+
+    /// The config's request variant for the image parts this builder holds
+    /// (ADR-096). Text Parts do not select a variant.
     fn variant(self: Image, cfg: image_gen.ImageGenDef) request_variant.Error!image_gen.RequestVariant {
-        return request_variant.select(cfg.variants, self.part_count_);
+        return request_variant.select(cfg.variants, self.image_count_);
+    }
+
+    /// The prompt the flat shapes send: the text Parts and then `prompt`,
+    /// newline-joined, skipping empty ones (Rust `join_text_parts`). Without
+    /// text Parts it is `prompt`, unchanged.
+    fn promptText(self: *const Image, arena: std.mem.Allocator, prompt: []const u8) ![]const u8 {
+        var texts: std.ArrayList([]const u8) = .empty;
+        for (self.parts_[0..self.part_count_]) |p| switch (p) {
+            .text => |t| if (t.len > 0) try texts.append(arena, t),
+            .image => {},
+        };
+        if (texts.items.len == 0) return prompt;
+        if (prompt.len > 0) try texts.append(arena, prompt);
+        return std.mem.join(arena, "\n", texts.items);
     }
 
     /// Build the image-generation request body as a dynamic JSON Value backed by
@@ -198,14 +301,15 @@ pub const Image = struct {
             return buildGoogleImageBody(arena, self, parts, prompt);
         if (eq(u8, shape, image_gen.multipart_form))
             return error.EditIsMultipart;
+        const text_prompt = try self.promptText(arena, prompt);
         if (eq(u8, shape, image_gen.json_generations_openai))
-            return buildOpenAIGenBody(arena, self, prompt);
+            return buildOpenAIGenBody(arena, self, text_prompt);
         if (eq(u8, shape, image_gen.json_inline_refs))
-            return buildXAIBody(arena, self, parts, prompt);
+            return buildXAIBody(arena, self, parts, text_prompt);
         if (eq(u8, shape, image_gen.json_predict))
-            return buildVertexBody(arena, self, prompt);
+            return buildVertexBody(arena, self, text_prompt);
         if (eq(u8, shape, image_gen.json_generations))
-            return buildRecraftGenBody(arena, self, prompt);
+            return buildRecraftGenBody(arena, self, text_prompt);
         return error.UnsupportedImageProvider;
     }
 
@@ -213,9 +317,9 @@ pub const Image = struct {
     /// multipart/form-data body for that variant's endpoint. Text fields
     /// come first in a fixed order (model, prompt, size, quality, output_format,
     /// background, n), then one `image[]` file part per reference image in
-    /// caller order, named `image-<i><ext>`. Mirrors Go
-    /// `buildOpenAIEditMultipart`. Rejects a call whose parts select any other
-    /// request shape.
+    /// caller order, named `image-<i><ext>`, then the `mask` file when set.
+    /// Mirrors Go `buildOpenAIEditMultipart` / Rust `build_openai_edit_form`.
+    /// Rejects a call whose parts select any other request shape.
     pub fn buildEditMultipart(self: Image, arena: std.mem.Allocator, prompt: []const u8) BuildError!Multipart {
         const cfg = image_gen.imageGenConfig(self.provider) orelse
             return error.UnsupportedImageProvider;
@@ -224,17 +328,27 @@ pub const Image = struct {
 
         var w: multipart.Writer = .{ .boundary = edit_boundary };
         if (self.model_) |m| try w.field(arena, "model", m);
-        try w.field(arena, "prompt", prompt);
+        try w.field(arena, "prompt", try self.promptText(arena, prompt));
         if (self.image_size_) |z| try w.field(arena, "size", z);
         if (self.quality_) |q| try w.field(arena, "quality", q);
         if (self.output_format_) |f| try w.field(arena, "output_format", f);
         if (self.background_) |bg| try w.field(arena, "background", bg);
         if (self.count_) |n| try w.field(arena, "n", try std.fmt.allocPrint(arena, "{d}", .{n}));
 
-        for (self.parts_[0..self.part_count_], 0..) |p, i| {
+        var i: usize = 0;
+        for (self.parts_[0..self.part_count_]) |part| {
+            const p = switch (part) {
+                .image => |img| img,
+                .text => continue,
+            };
             const mime = if (p.mime.len == 0) "image/png" else p.mime;
             const filename = try std.fmt.allocPrint(arena, "image-{d}{s}", .{ i, extFromMime(mime) });
             try w.file(arena, "image[]", filename, mime, p.bytes);
+            i += 1;
+        }
+        if (self.mask_) |m| {
+            const mime = if (m.mime.len == 0) "image/png" else m.mime;
+            try w.file(arena, "mask", try std.fmt.allocPrint(arena, "mask{s}", .{extFromMime(mime)}), mime, m.bytes);
         }
         return .{ .boundary = edit_boundary, .body = try w.finish(arena) };
     }
@@ -269,6 +383,7 @@ pub const Image = struct {
             return error.UnsupportedImageProvider;
         try self.checkImageParts(try self.resolveModel(cfg));
         const v = try self.variant(cfg);
+        try self.checkKnobs(v.shape);
         const endpoint = try imageEndpoint(arena, self.provider, v, self.model_ orelse "");
 
         if (std.mem.eql(u8, v.shape, image_gen.multipart_form)) {
@@ -283,12 +398,12 @@ pub const Image = struct {
             }, mp.body, try std.fmt.allocPrint(arena, "multipart/form-data; boundary={s}", .{mp.boundary}));
             const parsed = std.json.parseFromSliceLeaky(json.Value, arena, reply, .{}) catch
                 return error.ApiError;
-            return parseImageResponse(arena, self.provider, parsed);
+            return self.withRaw(try parseImageResponse(arena, self.provider, parsed), parsed);
         }
 
         const body = try self.buildImageBody(arena, prompt);
 
-        const raw = try send.postJson(transport, arena, .{
+        const reply_value = try send.postJson(transport, arena, .{
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
@@ -297,7 +412,26 @@ pub const Image = struct {
             .model = self.model_ orelse "",
         }, body);
 
-        return parseImageResponse(arena, self.provider, raw);
+        return self.withRaw(try parseImageResponse(arena, self.provider, reply_value), reply_value);
+    }
+
+    /// Set `raw` to the parsed reply when the caller opted in (ADR-014).
+    fn withRaw(self: Image, resp: ImageResponse, body: json.Value) ImageResponse {
+        var out = resp;
+        if (self.raw_) out.raw = body;
+        return out;
+    }
+
+    /// Reject a mask or safety knob the selected request shape has no field
+    /// for, instead of dropping it from the wire (Rust `generate_image`).
+    fn checkKnobs(self: Image, shape: []const u8) ValidationError!void {
+        const eq = std.mem.eql;
+        if (self.mask_ != null and !eq(u8, shape, image_gen.multipart_form))
+            return error.MaskUnsupported;
+        if (self.safety_filter_ != null and !eq(u8, shape, image_gen.json_predict))
+            return error.SafetyFilterUnsupported;
+        if (self.safety_settings_.len > 0 and !eq(u8, shape, image_gen.inline_parts))
+            return error.SafetySettingsUnsupported;
     }
 
     /// The catalogue entry for the configured model. An unknown model is
@@ -314,10 +448,10 @@ pub const Image = struct {
     /// llmkit limit, and the provider decides volume. Zig alone also rejects
     /// parts past the builder's fixed `max_image_parts` capacity.
     fn checkImageParts(self: Image, m: image_gen.ImageModelDef) ValidationError!void {
-        if (self.part_count_ > 0 and !m.supports_image_input)
+        if (self.image_count_ > 0 and !m.supports_image_input)
             return error.ImageInputUnsupported;
         if (self.parts_overflow_) return error.TooManyImageParts;
-        if (m.max_input_images > 0 and self.part_count_ > @as(usize, @intCast(m.max_input_images)))
+        if (m.max_input_images > 0 and self.image_count_ > @as(usize, @intCast(m.max_input_images)))
             return error.TooManyImageParts;
     }
 };
@@ -358,20 +492,34 @@ fn imageEndpoint(
 /// `role`, unlike the chat shape), each reference image as `{inlineData:
 /// {mimeType, data}}` (camelCase, base64 data), then the trailing `{text}` part;
 /// `generationConfig` carries `responseModalities` and — when set — an
-/// `imageConfig` with `aspectRatio`/`imageSize`. Mirrors Rust `build_image_body`.
-fn buildGoogleImageBody(arena: std.mem.Allocator, img: Image, parts: []const ImageInput, prompt: []const u8) BuildError!json.Value {
+/// `imageConfig` with `aspectRatio`/`imageSize`. Text Parts go out as `{text}`
+/// parts in caller order among the images; the prompt follows them (omitted
+/// when empty and text Parts exist). `safetySettings` sits at the body root.
+/// Mirrors Rust `build_image_body`.
+fn buildGoogleImageBody(arena: std.mem.Allocator, img: Image, parts: []const ImagePart, prompt: []const u8) BuildError!json.Value {
     var wire = json.array(arena);
-    for (parts) |p| {
-        var blk = json.object();
-        var inl = json.object();
-        try json.set(arena, &inl, "mimeType", .{ .string = p.mime });
-        try json.set(arena, &inl, "data", .{ .string = try base64Encode(arena, p.bytes) });
-        try json.set(arena, &blk, "inlineData", inl);
-        try wire.array.append(blk);
+    var has_text = false;
+    for (parts) |part| switch (part) {
+        .image => |p| {
+            var blk = json.object();
+            var inl = json.object();
+            try json.set(arena, &inl, "mimeType", .{ .string = p.mime });
+            try json.set(arena, &inl, "data", .{ .string = try base64Encode(arena, p.bytes) });
+            try json.set(arena, &blk, "inlineData", inl);
+            try wire.array.append(blk);
+        },
+        .text => |t| {
+            has_text = true;
+            var txt = json.object();
+            try json.set(arena, &txt, "text", .{ .string = t });
+            try wire.array.append(txt);
+        },
+    };
+    if (prompt.len > 0 or !has_text) {
+        var txt = json.object();
+        try json.set(arena, &txt, "text", .{ .string = prompt });
+        try wire.array.append(txt);
     }
-    var txt = json.object();
-    try json.set(arena, &txt, "text", .{ .string = prompt });
-    try wire.array.append(txt);
 
     var turn = json.object();
     try json.set(arena, &turn, "parts", wire);
@@ -393,6 +541,16 @@ fn buildGoogleImageBody(arena: std.mem.Allocator, img: Image, parts: []const Ima
     var body = json.object();
     try json.set(arena, &body, "contents", contents);
     try json.set(arena, &body, "generationConfig", gen);
+    if (img.safety_settings_.len > 0) {
+        var ss = json.array(arena);
+        for (img.safety_settings_) |setting| {
+            var entry = json.object();
+            try json.set(arena, &entry, "category", .{ .string = setting.category });
+            try json.set(arena, &entry, "threshold", .{ .string = setting.threshold });
+            try ss.array.append(entry);
+        }
+        try json.set(arena, &body, "safetySettings", ss);
+    }
     return body;
 }
 
@@ -419,7 +577,7 @@ fn buildOpenAIGenBody(arena: std.mem.Allocator, img: Image, prompt: []const u8) 
 /// defaults to URL delivery. One image part -> `image: {url: "data:..."}`;
 /// several -> `images: [{url: "data:..."}, ...]` in caller order; none -> no
 /// image field. Mirrors Go `buildXAIBody`.
-fn buildXAIBody(arena: std.mem.Allocator, img: Image, parts: []const ImageInput, prompt: []const u8) BuildError!json.Value {
+fn buildXAIBody(arena: std.mem.Allocator, img: Image, parts: []const ImagePart, prompt: []const u8) BuildError!json.Value {
     var body = json.object();
     if (img.model_) |m| try json.set(arena, &body, "model", .{ .string = m });
     try json.set(arena, &body, "prompt", .{ .string = prompt });
@@ -429,7 +587,11 @@ fn buildXAIBody(arena: std.mem.Allocator, img: Image, parts: []const ImageInput,
     if (img.count_) |n| try json.set(arena, &body, "n", .{ .integer = n });
 
     var refs = json.array(arena);
-    for (parts) |p| {
+    for (parts) |part| {
+        const p = switch (part) {
+            .image => |x| x,
+            .text => continue,
+        };
         const mime = if (p.mime.len == 0) "image/png" else p.mime;
         const url = try std.fmt.allocPrint(arena, "data:{s};base64,{s}", .{ mime, try base64Encode(arena, p.bytes) });
         var ref = json.object();
@@ -448,7 +610,7 @@ fn buildXAIBody(arena: std.mem.Allocator, img: Image, parts: []const ImageInput,
 /// {sampleCount, aspectRatio?}}`. `sampleCount` defaults to 1. The Imagen
 /// generate models take text only (BUG-101): the config has no
 /// WithReferenceImages variant, so image parts never reach here. Mirrors Go
-/// `buildVertexBody`.
+/// `buildVertexBody`. A safety filter lands at `parameters.safetySetting`.
 fn buildVertexBody(arena: std.mem.Allocator, img: Image, prompt: []const u8) BuildError!json.Value {
     var instance = json.object();
     try json.set(arena, &instance, "prompt", .{ .string = prompt });
@@ -458,6 +620,7 @@ fn buildVertexBody(arena: std.mem.Allocator, img: Image, prompt: []const u8) Bui
     var parameters = json.object();
     try json.set(arena, &parameters, "sampleCount", .{ .integer = img.count_ orelse 1 });
     if (img.aspect_ratio_) |r| try json.set(arena, &parameters, "aspectRatio", .{ .string = r });
+    if (img.safety_filter_) |sf| try json.set(arena, &parameters, "safetySetting", .{ .string = sf });
 
     var body = json.object();
     try json.set(arena, &body, "instances", instances);
@@ -1050,3 +1213,132 @@ fn testCtx() http.Ctx {
 
 
 
+
+// === HANDOFF-086: text Parts, mask, safety knobs, raw, builder middleware ===
+
+fn testImage(gpa: std.mem.Allocator, provider: ProviderName) Image {
+    return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = std.testing.io } };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// Counts every middleware event it sees.
+const TestCounter = struct {
+    calls: usize = 0,
+
+    fn call(ptr: *anyopaque, _: *const middleware.Event) ?[]const u8 {
+        const self: *TestCounter = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        return null;
+    }
+
+    fn hook(self: *TestCounter) middleware.Middleware {
+        return .{ .ptr = self, .call_fn = call };
+    }
+};

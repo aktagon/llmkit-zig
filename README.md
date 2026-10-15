@@ -192,7 +192,7 @@ Add `.image(mime, bytes)` to send a reference image (an edit) on providers that 
 
 ```zig
 const resp = try client.music()
-    .addLyrics("[verse]\nRain on the window")
+    .lyrics("[verse]\nRain on the window")
     .generate(arena, key, "A slow piano ballad");
 
 for (resp.audio) |clip| {
@@ -203,13 +203,13 @@ for (resp.audio) |clip| {
 ### Video: submit a job
 
 ```zig
-const operation_id = try client.video()
+const handle = try client.video()
     .model("veo-3.0-generate-001")
     .submit(arena, key, "A paper boat drifting down a stream");
-std.debug.print("submitted: {s}\n", .{operation_id});
+std.debug.print("submitted: {s}\n", .{handle.id});
 ```
 
-`submit` returns the provider's job id. Polling a video job is not yet supported; see [Not yet supported](#not-yet-supported).
+`submit` returns a `VideoHandle` whose `id` is the provider's job id. Polling a video job is not yet supported; see [Not yet supported](#not-yet-supported).
 
 ### Speech: text-to-speech
 
@@ -234,12 +234,10 @@ std.debug.print("{s}\n", .{resp.text});
 ### Upload
 
 ```zig
-const pdf = try std.Io.Dir.cwd().readFileAlloc(io, "report.pdf", arena, .unlimited);
-
 const file = try client.upload()
-    .filename("report.pdf")
-    .mime("application/pdf")
-    .run(arena, key, pdf);
+    .path("report.pdf")
+    .mimeType("application/pdf")
+    .run(arena, key);
 
 const resp = try client.text()
     .file(file.id)
@@ -321,6 +319,9 @@ The `Text` builder carries these chain methods:
 | `protocol(.responses)` | the OpenAI Responses API instead of Chat Completions |
 | `safetySettings(list)` | Google safety settings |
 | `text(s)` | an extra text part on the user turn |
+| `raw()` | `Response.raw`: the parsed provider reply, for fields the response does not carry |
+
+The `Agent` builder takes the same generation options, from `maxTokens` to `safetySettings`. `raw()` is also on `Agent`, `Image`, `Music` and `Video`; for `Video` it is recorded on the returned handle.
 
 ## Self-hosted endpoints
 
@@ -366,14 +367,15 @@ _ = logged;
 
 The `ptr` is yours: point it at whatever state the hook needs. It must outlive every client that holds it.
 
+Every builder also has `addMiddleware`. A hook added there fires for that builder's calls only, after the client's hooks.
+
 ## Not yet supported
 
 - **AWS Bedrock:** requests are not signed, so Bedrock calls cannot be sent.
 - **Streaming** for the Anthropic and Bedrock chat shapes, and with `protocol(.responses)`. OpenAI-compatible providers and Google stream over Chat Completions.
-- **Video polling:** `Video.submit` returns the job id; fetching the result is not available.
+- **Video polling:** `Video.submit` returns a handle with the job id; fetching the result is not available.
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
 - **Cache resources:** creating a Google `cachedContents` resource ahead of time.
-- **Raw responses:** the `raw` field on responses is always null.
 - **Telemetry export:** the client does not send OpenTelemetry spans.
 
 ## Mirror
