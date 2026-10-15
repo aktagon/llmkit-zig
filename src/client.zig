@@ -1025,6 +1025,40 @@ const TestHook = struct {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 fn sentHeader(req: http.Request, name: []const u8) ?[]const u8 {
     for (req.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     return null;
