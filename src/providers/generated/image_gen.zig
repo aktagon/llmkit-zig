@@ -7,6 +7,8 @@ const ProviderName = @import("providers.zig").ProviderName;
 pub const text_only = "TextOnly";
 /// Carried input: a request variant that carries reference images (ADR-096).
 pub const with_reference_images = "WithReferenceImages";
+/// Carried input: a video request variant that carries a seed frame (ADR-096).
+pub const with_seed_frame = "WithSeedFrame";
 
 // Image request shapes: each names one request body (ADR-096).
 pub const inline_parts = "InlineParts";
