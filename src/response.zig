@@ -3,7 +3,8 @@
 //!
 //! The INBOUND mirror of `request.zig`: given a provider's chat REPLY body
 //! (already parsed into the `json.Value` waist), project it to the normalized
-//! `{content, finish_reason, usage, err}` every SDK agrees on. Every field is
+//! `{text, finish_reason, usage}` every SDK agrees on, plus the error envelope
+//! (`Decoded.err`). Every field is
 //! pulled through a GENERATED per-provider JSON path fact — there is no
 //! switch-on-provider-name here, exactly as `rust/src/response.rs` mirrors: the
 //! content path (`response.zig`), the usage input/output paths (`response.zig`),
@@ -33,7 +34,6 @@ const json = @import("json.zig");
 const providers = @import("providers/generated/providers.zig");
 const response_paths = @import("providers/generated/response.zig");
 const caching = @import("providers/generated/caching.zig");
-const provider_turn = @import("provider_turn.zig");
 
 const ProviderName = providers.ProviderName;
 
@@ -54,22 +54,21 @@ pub const ApiError = struct {
     type: []const u8 = "",
 };
 
-/// The normalized chat reply. `err` is non-null only when the body carries a
+/// The normalized chat reply. `usage` MUST keep this name — the naming lint
+/// keys on it. `raw` is always null until the `.raw()` opt-in lands (BUG-073).
+/// `provider_turn` is populated by the SEND seam, not by `decodeResponse`: the
+/// codec is Value-typed (ADR-069 ZIG-002) and a parsed tree has no memory of the
+/// source text, so the bytes are sliced where they still exist (ADR-085).
+pub const Response = @import("providers/generated/structs.zig").Response;
+
+/// What the codec reads from one reply body: the canonical `Response` plus the
+/// provider error envelope. `err` is non-null only when the body carries a
 /// message at the provider's `error_message_path` (a successful reply leaves it
-/// null). `usage` MUST keep this name — the naming lint keys on it.
-pub const Response = struct {
-    content: []const u8,
-    finish_reason: ?[]const u8,
-    finish_message: ?[]const u8 = null,
-    err: ?ApiError = null,
-    usage: Usage,
-    /// The assistant turn this response carried, as the provider serialized it
-    /// (ADR-085). Populated by the SEND seam, not by `decodeResponse`: the codec
-    /// is Value-typed (ADR-069 ZIG-002) and a parsed tree has no memory of the
-    /// source text, so the bytes are sliced where they still exist. Null when the
-    /// shape declares no turn position (Bedrock) or the body carries nothing
-    /// there.
-    provider_turn: ?provider_turn.ProviderTurn = null,
+/// null). The envelope lives here, not on `Response`, because the cross-SDK
+/// `Response` has no error field.
+pub const Decoded = struct {
+    response: Response,
+    err: ?ApiError,
 };
 
 /// Read the assistant's text out of a parsed provider body.
@@ -227,10 +226,10 @@ pub fn decodeResponse(
     provider: ProviderName,
     chat_wire_shape_raw: []const u8,
     raw: json.Value,
-) !Response {
+) !Decoded {
     const chat_wire_shape = resolveChatWireShape(provider, chat_wire_shape_raw);
     if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) {
-        return parseResponsesEnvelope(arena, raw);
+        return .{ .response = try parseResponsesEnvelope(arena, raw), .err = null };
     }
 
     const ps = providers.spec(provider);
@@ -238,27 +237,31 @@ pub fn decodeResponse(
     const cache = caching.cacheUsagePaths(provider);
 
     return .{
-        .content = try arena.dupe(u8, try extractResponseText(arena, raw, provider, chat_wire_shape)),
-        .finish_reason = try dupOptString(arena, stringAt(raw, ps.finish_reason_path)),
-        .finish_message = try dupOptString(arena, stringAt(raw, ps.finish_message_path)),
         .err = try detectError(arena, raw, ps),
-        .usage = .{
-            .input = optInt(raw, usage_paths.input),
-            .output = optInt(raw, usage_paths.output),
-            .cache_write = optInt(raw, cache.write),
-            .cache_read = optInt(raw, cache.read),
-            .reasoning = optInt(raw, ps.reasoning_tokens_path),
-            // Scaling PRESERVES absence: an unreported cost stays unreported
-            // rather than becoming `0.0 * scale` (AVAIL-007).
-            .cost = if (optFloat(raw, response_paths.usageCostPath(provider))) |c|
-                c * response_paths.usageCostScale(provider)
-            else
-                null,
+        .response = .{
+            .text = try arena.dupe(u8, try extractResponseText(arena, raw, provider, chat_wire_shape)),
+            .finish_reason = try dupOptString(arena, stringAt(raw, ps.finish_reason_path)),
+            .finish_message = try dupOptString(arena, stringAt(raw, ps.finish_message_path)),
+            .raw = null,
+            .provider_turn = null,
+            .usage = .{
+                .input = optInt(raw, usage_paths.input),
+                .output = optInt(raw, usage_paths.output),
+                .cache_write = optInt(raw, cache.write),
+                .cache_read = optInt(raw, cache.read),
+                .reasoning = optInt(raw, ps.reasoning_tokens_path),
+                // Scaling PRESERVES absence: an unreported cost stays unreported
+                // rather than becoming `0.0 * scale` (AVAIL-007).
+                .cost = if (optFloat(raw, response_paths.usageCostPath(provider))) |c|
+                    c * response_paths.usageCostScale(provider)
+                else
+                    null,
+            },
         },
     };
 }
 
-/// `decodeResponse`'s inverse: render a canonical `Response` back onto the wire
+/// `decodeResponse`'s inverse: render a `Decoded` reply back onto the wire
 /// for `provider` + `chat_wire_shape`. Every write location comes from the same
 /// generated path accessors `decodeResponse` reads — there is no second table,
 /// no switch on the provider name and no path literal here (ADR-076 SYM-005).
@@ -275,8 +278,9 @@ pub fn encodeResponse(
     arena: std.mem.Allocator,
     provider: ProviderName,
     chat_wire_shape_raw: []const u8,
-    resp: Response,
+    decoded: Decoded,
 ) EncodeError!json.Value {
+    const resp = decoded.response;
     const chat_wire_shape = resolveChatWireShape(provider, chat_wire_shape_raw);
     try guardOneWayFields(provider, resp);
     if (std.mem.eql(u8, chat_wire_shape, "ChatResponsesOpenAI")) {
@@ -288,7 +292,7 @@ pub fn encodeResponse(
     const cache = caching.cacheUsagePaths(provider);
 
     var raw = json.object();
-    try encodeResponseText(arena, &raw, provider, chat_wire_shape, resp.content);
+    try encodeResponseText(arena, &raw, provider, chat_wire_shape, resp.text);
     try json.setWirePath(arena, &raw, usage_paths.input, json.wireInt(resp.usage.input));
     try json.setWirePath(arena, &raw, usage_paths.output, json.wireInt(resp.usage.output));
     try json.setWirePath(arena, &raw, cache.write, json.wireInt(resp.usage.cache_write));
@@ -302,10 +306,10 @@ pub fn encodeResponse(
     try json.setWirePath(arena, &raw, ps.reasoning_tokens_path, json.wireInt(resp.usage.reasoning));
     try json.setWirePath(arena, &raw, ps.finish_reason_path, json.wireString(resp.finish_reason));
     try json.setWirePath(arena, &raw, ps.finish_message_path, json.wireString(resp.finish_message));
-    // The error envelope is part of the canonical projection Zig's `Response`
-    // carries (`err`), so its two paths are written back like any other — the
-    // mirror of `detectError`.
-    if (resp.err) |e| {
+    // The error envelope is part of what `decodeResponse` reads (`Decoded.err`),
+    // so its two paths are written back like any other — the mirror of
+    // `detectError`.
+    if (decoded.err) |e| {
         try json.setWirePath(arena, &raw, ps.error_message_path, .{ .string = e.message });
         try json.setWirePath(arena, &raw, ps.error_type_path, .{ .string = e.type });
     }
@@ -351,8 +355,11 @@ fn guardOneWayFields(provider: ProviderName, resp: Response) EncodeError!void {
 /// behavior held by tests, not by declared response paths).
 fn parseResponsesEnvelope(arena: std.mem.Allocator, raw: json.Value) !Response {
     return .{
-        .content = try arena.dupe(u8, extractResponsesText(raw)),
+        .text = try arena.dupe(u8, extractResponsesText(raw)),
         .finish_reason = try dupOptString(arena, stringAt(raw, "status")),
+        .finish_message = null,
+        .raw = null,
+        .provider_turn = null,
         // The Responses envelope carries no cache-write or cost field at all.
         // That is not a zero: it is the provider never making the claim.
         .usage = .{
@@ -395,10 +402,10 @@ fn isTagged(value: json.Value, want: []const u8) bool {
 /// reader, for the same reason the reader is.
 fn encodeResponsesEnvelope(arena: std.mem.Allocator, resp: Response) EncodeError!json.Value {
     var raw = json.object();
-    if (resp.content.len > 0) {
+    if (resp.text.len > 0) {
         var block = json.object();
         try json.set(arena, &block, "type", .{ .string = "output_text" });
-        try json.set(arena, &block, "text", .{ .string = resp.content });
+        try json.set(arena, &block, "text", .{ .string = resp.text });
         var content = json.array(arena);
         try content.array.append(block);
 
@@ -416,6 +423,24 @@ fn encodeResponsesEnvelope(arena: std.mem.Allocator, resp: Response) EncodeError
     try json.setWirePath(arena, &raw, "status", json.wireString(resp.finish_reason));
     return raw;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

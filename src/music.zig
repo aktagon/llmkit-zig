@@ -33,6 +33,7 @@ const json = @import("json.zig");
 const http = @import("http.zig");
 const send = @import("send.zig");
 const response = @import("response.zig");
+const structs = @import("providers/generated/structs.zig");
 const providers = @import("providers/generated/providers.zig");
 const music_gen = @import("providers/generated/music_gen.zig");
 
@@ -43,22 +44,15 @@ pub const ProviderName = providers.ProviderName;
 const shape_predict = "MusicPredict";
 const shape_minimax = "MusicMinimax";
 
-/// One decoded audio clip: the provider's output MIME plus RAW bytes. Same
-/// shape as the speech path's `AudioData` — ADR-037 reuses the container rather
+/// One decoded audio clip: the provider's output MIME plus RAW bytes. The same
+/// type as the speech path's `AudioData` — ADR-037 reuses the container rather
 /// than inventing a music-specific one.
-pub const AudioData = struct {
-    mime_type: []const u8,
-    bytes: []const u8,
-};
+pub const AudioData = structs.AudioData;
 
 /// The normalized music reply: the generated clips, the shared token carrier
-/// (zero for music — no provider reports one), and an optional finish reason
-/// (Vertex reports `raiFilteredReason` when a clip was filtered).
-pub const MusicResponse = struct {
-    audio: []const AudioData,
-    usage: response.Usage = .{},
-    finish_reason: ?[]const u8 = null,
-};
+/// (unreported for music — no provider reports one), and an optional finish
+/// reason (Vertex reports `raiFilteredReason` when a clip was filtered).
+pub const MusicResponse = structs.MusicResponse;
 
 pub const BuildError = error{
     UnsupportedMusicProvider,
@@ -228,18 +222,20 @@ fn buildMinimaxBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []cons
     return body;
 }
 
-/// Gemini `generateContent` (Lyria 3): prompt and lyrics both serialise as
-/// `{text}` parts in caller order; `responseModalities:["AUDIO"]` asks for audio.
+/// Gemini `generateContent` (Lyria 3): lyrics and prompt both serialise as
+/// `{text}` parts, the lyrics Parts in call order and the terminal's prompt
+/// last — the order every Part-taking terminal uses, and the one the
+/// music-google golden locks. `responseModalities:["AUDIO"]` asks for audio.
 fn buildGeminiBody(arena: std.mem.Allocator, prompt: []const u8, lyrics: []const []const u8) !json.Value {
     var wire = json.array(arena);
-    if (prompt.len > 0) {
-        var p = json.object();
-        try json.set(arena, &p, "text", .{ .string = prompt });
-        try wire.array.append(p);
-    }
     for (lyrics) |l| {
         var p = json.object();
         try json.set(arena, &p, "text", .{ .string = l });
+        try wire.array.append(p);
+    }
+    if (prompt.len > 0) {
+        var p = json.object();
+        try json.set(arena, &p, "text", .{ .string = prompt });
         try wire.array.append(p);
     }
 
@@ -300,7 +296,7 @@ fn parsePredictResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime
         }
     };
 
-    return .{ .audio = try clips.toOwnedSlice(arena), .finish_reason = finish };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = finish, .finish_message = null, .raw = null };
 }
 
 fn parseMinimaxResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime: []const u8) !MusicResponse {
@@ -311,7 +307,7 @@ fn parseMinimaxResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime
             try clips.append(arena, .{ .mime_type = fallback_mime, .bytes = bytes });
         } else |_| {}
     }
-    return .{ .audio = try clips.toOwnedSlice(arena) };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = null, .finish_message = null, .raw = null };
 }
 
 fn parseGeminiResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime: []const u8) !MusicResponse {
@@ -336,7 +332,7 @@ fn parseGeminiResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime:
         }
     };
 
-    return .{ .audio = try clips.toOwnedSlice(arena), .finish_reason = finish };
+    return .{ .audio = try clips.toOwnedSlice(arena), .text = "", .usage = .{}, .finish_reason = finish, .finish_message = null, .raw = null };
 }
 
 /// A non-empty string at a dotted path, else null (so `orelse` chains read as
@@ -373,6 +369,36 @@ const testing = std.testing;
 fn testMusic(gpa: std.mem.Allocator, provider: ProviderName) Music {
     return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = testing.io } };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

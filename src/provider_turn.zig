@@ -12,14 +12,8 @@
 //! path down to the turn — everything at and below it is carried as the provider
 //! wrote it.
 //!
-//! **Scope in Zig: capture only.** The Zig SDK has no multi-turn message-history
-//! body builder yet — `request.flatMessages` emits one user turn, and the agent's
-//! auto-execution tool LOOP is deferred with it (see the scope note at the top of
-//! `agent.zig`, HANDOFF-043). Replay is a splice into a history array that does
-//! not exist here, so the second leg lands with that builder. Capture is wired
-//! now, on the send seams, because `Response.provider_turn` is what lets a caller
-//! running their own loop thread the turn forward (ADR-085 § 6) — and because a
-//!
+//! This file holds the capture half. Replay lives in `messages.zig`, which
+//! splices a captured turn into the next request's history.
 //!
 //! Zig-specific note. `decodeResponse` takes a parsed `json.Value`, not bytes:
 //! the pure wire seam is Value-typed at both ends and the send seam does the
@@ -37,14 +31,7 @@ const providers = @import("providers/generated/providers.zig");
 /// it survives at rest byte-for-byte; `wire_shape` is the `ChatWireShape`
 /// that produced it, spelled exactly as the SDK constant, because a payload is
 /// only ever replayed under the shape that produced it (RSN-006).
-///
-/// Declared here — as `speech.zig` declares its own `AudioData` and `image.zig`
-/// its own `ImageData` — rather than consumed from the generated `structs.zig`,
-/// which is not yet wired into the module graph.
-pub const ProviderTurn = struct {
-    wire_shape: []const u8,
-    wire: []const u8,
-};
+pub const ProviderTurn = @import("providers/generated/structs.zig").ProviderTurn;
 
 /// One dot-notation path segment: a field name plus an array index, or `null`
 /// when the segment carries none.
@@ -257,7 +244,7 @@ pub fn capture(
 // against the live APIs — in particular that Anthropic returns
 // [thinking, text, tool_use] on a turn that calls a tool, and that Google
 // attaches exactly ONE thoughtSignature per turn, on the first function-call
-// part. The replay half has no counterpart here: see the scope note above.
+// part. The replay half is tested in messages.zig.
 
 const anthropic_turn_body =
     \\{

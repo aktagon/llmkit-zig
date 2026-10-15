@@ -12,7 +12,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const llmkit_mod = b.createModule(.{
+    // `addModule`, not `createModule`: a dependent package reaches the SDK
+    // through `b.dependency("llmkit", ...).module("llmkit")`, which finds only
+    // modules registered by name.
+    const llmkit_mod = b.addModule("llmkit", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
