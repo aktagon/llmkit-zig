@@ -26,6 +26,7 @@ const provider_turn = @import("provider_turn.zig");
 const capability = @import("capability.zig");
 const middleware = @import("middleware.zig");
 const caching_mod = @import("caching.zig");
+const telemetry = @import("telemetry.zig");
 
 pub const ProviderName = providers.ProviderName;
 
@@ -37,6 +38,21 @@ pub const Protocol = request.Protocol;
 
 /// Google safety setting `{category, threshold}`, re-exported from `request.zig`.
 pub const SafetySetting = request.SafetySetting;
+
+/// Decode a chat reply: the normalized Response plus the ADR-085 provider turn.
+/// The turn is captured from the reply BYTES as the provider serialized them;
+/// `decodeResponse` only sees the parsed tree, which has no memory of them
+/// (ADR-069 ZIG-002), so the capture happens here.
+fn decodeChatReply(
+    arena: std.mem.Allocator,
+    provider: ProviderName,
+    shape: []const u8,
+    reply: send.Reply,
+) !response_mod.Response {
+    var resp = (try response_mod.decodeResponse(arena, provider, shape, reply.value)).response;
+    resp.provider_turn = try provider_turn.capture(arena, reply.text, provider, shape);
+    return resp;
+}
 
 pub const Client = struct {
     provider: ProviderName,
@@ -100,6 +116,16 @@ pub const Client = struct {
         return c;
     }
 
+    /// Enable opt-in telemetry (ADR-054 / ADR-059): every operation this client
+    /// performs emits one OTEL span on the post phase, handed synchronously to
+    /// `t.export`. Rides the middleware seam, so it uses one of the
+    /// `max_middleware` hook slots. Binds the client's allocator and `Io` onto
+    /// `t` for building spans. `t` is borrowed and must outlive the client.
+    pub fn addTelemetry(self: Client, t: *telemetry.Telemetry) Client {
+        t.bound = .{ .gpa = self.ctx.gpa, .io = self.ctx.io };
+        return self.addMiddleware(t.hook());
+    }
+
     /// Whether this client's provider supports `cap` (ADR-030). Reads the same
     /// generated capability facts the strict validation paths use (CAP-002) —
     /// never a provider-name switch. No I/O.
@@ -154,9 +180,9 @@ pub const Client = struct {
 
     /// Enter the model-catalogue builder (ADR-019). `list`/`get` walk the
     /// compiled-in catalogue; `provider(p)` scopes to one provider's live
-    /// `/models` request-assembly seam. Carries the client's base-URL override.
+    /// `/models` endpoint. Carries the client's send context.
     pub fn models(self: Client) models_mod.Models {
-        return .{ .base_url = self.ctx.base_url };
+        return .{ .ctx = self.ctx };
     }
 
     /// Enter the providers-namespace builder (ADR-019). `list()` returns the
@@ -495,7 +521,11 @@ pub const Text = struct {
         const model_id = try request.effectiveModel(providers.spec(self.provider), cfg.model);
         var body = try request.buildChatBody(arena, cfg);
         if (cfg.caching) try caching_mod.applyResourceCaching(transport, arena, &self.ctx, self.provider, api_key, model_id, &body);
-        const reply = try send.postJsonWithText(transport, arena, .{
+        // The EFFECTIVE wire shape — the same one buildChatBody resolved — so a
+        // `.protocol(.responses)` reply is decoded with the Responses envelope
+        // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
+        const shape = try request.resolveWireShape(providers.spec(self.provider), cfg.protocol);
+        const args = send.Args{
             .provider = self.provider,
             .ctx = &self.ctx,
             .api_key = api_key,
@@ -503,17 +533,15 @@ pub const Text = struct {
             .extra_headers = try request.buildRequestHeaders(arena, cfg),
             .op = .llm_request,
             .model = model_id,
-        }, body);
-        // The EFFECTIVE wire shape — the same one buildChatBody resolved — so a
-        // `.protocol(.responses)` reply is decoded with the Responses envelope
-        // and not, silently, with the Chat Completions paths (ADR-076 SYM-003).
-        const shape = try request.resolveWireShape(providers.spec(self.provider), cfg.protocol);
-        var resp = (try response_mod.decodeResponse(arena, self.provider, shape, reply.value)).response;
-        // ADR-085: capture the assistant turn as the provider serialized it, from
-        // the reply BYTES. decodeResponse only ever sees the parsed tree, which
-        // has no memory of them (ADR-069 ZIG-002), so the capture happens here.
-        resp.provider_turn = try provider_turn.capture(arena, reply.text, self.provider, shape);
+            .post = .by_caller,
+        };
+        const reply = try send.postJsonWithText(transport, arena, args, body);
+        var resp = decodeChatReply(arena, self.provider, shape, reply) catch |err| {
+            send.firePostDecodeError(args);
+            return err;
+        };
         if (self.raw_) resp.raw = reply.value;
+        send.firePostUsage(args, resp.usage.input, resp.usage.output);
         return resp;
     }
 
@@ -1001,3 +1029,144 @@ fn sentHeader(req: http.Request, name: []const u8) ?[]const u8 {
     for (req.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     return null;
 }
+
+// === Telemetry export (ADR-054 / ADR-059) ===
+
+/// A scripted transport that COPIES each request into its own arena.
+/// `MockTransport.captured` holds borrowed views, and the OTLP export builds
+/// its request in a per-span arena that is freed once the export returns, so
+/// the export body must be copied to outlive the call.
+const CopyingTransport = struct {
+    arena: std.heap.ArenaAllocator,
+    responses: []const http.Response,
+    index: usize = 0,
+    sent: std.ArrayList(http.Request) = .empty,
+
+    fn init(gpa: std.mem.Allocator, responses: []const http.Response) CopyingTransport {
+        return .{ .arena = std.heap.ArenaAllocator.init(gpa), .responses = responses };
+    }
+
+    fn deinit(self: *CopyingTransport) void {
+        self.arena.deinit();
+    }
+
+    fn sendImpl(ptr: *anyopaque, arena: std.mem.Allocator, req: http.Request) anyerror!http.Response {
+        _ = arena;
+        const self: *CopyingTransport = @ptrCast(@alignCast(ptr));
+        const a = self.arena.allocator();
+        const headers = try a.alloc(http.Header, req.headers.len);
+        for (req.headers, 0..) |h, i| headers[i] = .{ .name = try a.dupe(u8, h.name), .value = try a.dupe(u8, h.value) };
+        try self.sent.append(a, .{
+            .method = req.method,
+            .url = try a.dupe(u8, req.url),
+            .headers = headers,
+            .body = try a.dupe(u8, req.body),
+        });
+        if (self.index >= self.responses.len) return error.CollectorUnreachable;
+        const r = self.responses[self.index];
+        self.index += 1;
+        return r;
+    }
+
+    fn transport(self: *CopyingTransport) http.Transport {
+        return .{ .ptr = self, .send_fn = sendImpl };
+    }
+};
+
+const telemetry_mod = telemetry;
+
+fn headerValue(headers: []const http.Header, name: []const u8) ?[]const u8 {
+    for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    return null;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

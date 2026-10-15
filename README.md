@@ -306,6 +306,15 @@ if (client.models().get("claude-sonnet-4-6")) |m| {
 }
 ```
 
+`provider(p).list` asks the provider's `/models` endpoint for what your key can use, following pagination to the last page. `provider(p).get` fetches one model. Each result carries the capabilities llmkit knows for that id; `raw()` keeps the provider's record on `m.raw`.
+
+```zig
+const live = try client.models().provider(.openai).list(arena, api_key);
+std.debug.print("{d} models available to this key\n", .{live.len});
+```
+
+A 403 for a key without the models scope returns `error.Scope`; any other failure returns `error.Unavailable`.
+
 ### Capability query
 
 ```zig
@@ -380,12 +389,24 @@ The `ptr` is yours: point it at whatever state the hook needs. It must outlive e
 
 Every builder also has `addMiddleware`. A hook added there fires for that builder's calls only, after the client's hooks.
 
+## Telemetry
+
+`addTelemetry` turns on OpenTelemetry export. Each operation the client performs produces one OTLP span (OTEL GenAI attributes: operation, provider, model, token usage, error type). The span is handed to your `export` callback when the call returns. `HttpExport` is a ready-made callback that POSTs each span to `<endpoint>/v1/traces`.
+
+```zig
+const collector_headers = [_]llmkit.http.Header{.{ .name = "x-honeycomb-team", .value = ingest_key }};
+var exporter = try llmkit.HttpExport.init(gpa, io, "http://localhost:4318", &collector_headers);
+var tel = llmkit.Telemetry{ .@"export" = exporter.exporter() };
+const traced = client.addTelemetry(&tel);
+```
+
+The export is synchronous and fail-open: a collector error never fails the call. `HttpExport` waits at most 5 seconds per span, so use it for low volume. For high volume, pass your own `llmkit.TelemetryExport` that queues the bytes into your OTEL pipeline. `tel` and `exporter` must outlive the client.
+
 ## Not yet supported
 
 - **Streaming** for the Bedrock chat shape, and with `protocol(.responses)`. OpenAI-compatible providers, Anthropic and Google stream.
 - **Video polling:** `Video.submit` returns a handle with the job id; fetching the result is not available.
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
-- **Telemetry export:** the client does not send OpenTelemetry spans.
 
 ## Mirror
 
