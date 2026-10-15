@@ -422,7 +422,8 @@ The export is synchronous and fail-open: a collector error never fails the call.
 
 ## Not yet supported
 
-- **Bedrock streaming** is not supported. No SDK streams Bedrock today.
+- **Bedrock streaming.** `stream` on Bedrock returns `error.UnsupportedWireShape`
+  before any request is sent. Use `prompt` instead.
 
 ## Mirror
 
