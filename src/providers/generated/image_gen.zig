@@ -9,6 +9,8 @@ pub const text_only = "TextOnly";
 pub const with_reference_images = "WithReferenceImages";
 /// Carried input: a video request variant that carries a seed frame (ADR-096).
 pub const with_seed_frame = "WithSeedFrame";
+/// Carried input: a video request variant that carries a last frame (ADR-096).
+pub const with_last_frame = "WithLastFrame";
 
 // Image request shapes: each names one request body (ADR-096).
 pub const inline_parts = "InlineParts";
@@ -21,9 +23,10 @@ pub const json_generations = "JSONGenerations";
 
 /// One wire request of an image or video config, keyed by the inputs it
 /// carries (ADR-096). `shape` is empty on a video variant; an empty
-/// `endpoint` means the provider's main endpoint template.
+/// `endpoint` means the provider's main endpoint template. `carries` lists
+/// the carried inputs; a first-and-last-frame variant carries two.
 pub const RequestVariant = struct {
-    carries: []const u8,
+    carries: []const []const u8,
     shape: []const u8,
     endpoint: []const u8,
 };
@@ -62,8 +65,8 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_output_path = "usageMetadata.candidatesTokenCount",
             .usage_reasoning_path = "usageMetadata.thoughtsTokenCount",
             .variants = &.{
-                .{ .carries = "TextOnly", .shape = "InlineParts", .endpoint = "" },
-                .{ .carries = "WithReferenceImages", .shape = "InlineParts", .endpoint = "" },
+                .{ .carries = &.{ "TextOnly" }, .shape = "InlineParts", .endpoint = "" },
+                .{ .carries = &.{ "WithReferenceImages" }, .shape = "InlineParts", .endpoint = "" },
             },
             .models = &.{
                 .{
@@ -91,8 +94,8 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_output_path = "",
             .usage_reasoning_path = "",
             .variants = &.{
-                .{ .carries = "TextOnly", .shape = "JSONInlineRefs", .endpoint = "/v1/images/generations" },
-                .{ .carries = "WithReferenceImages", .shape = "JSONInlineRefs", .endpoint = "/v1/images/edits" },
+                .{ .carries = &.{ "TextOnly" }, .shape = "JSONInlineRefs", .endpoint = "/v1/images/generations" },
+                .{ .carries = &.{ "WithReferenceImages" }, .shape = "JSONInlineRefs", .endpoint = "/v1/images/edits" },
             },
             .models = &.{
                 .{
@@ -112,8 +115,8 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_output_path = "usage.output_tokens",
             .usage_reasoning_path = "",
             .variants = &.{
-                .{ .carries = "TextOnly", .shape = "JSONGenerationsOpenAI", .endpoint = "/v1/images/generations" },
-                .{ .carries = "WithReferenceImages", .shape = "MultipartForm", .endpoint = "/v1/images/edits" },
+                .{ .carries = &.{ "TextOnly" }, .shape = "JSONGenerationsOpenAI", .endpoint = "/v1/images/generations" },
+                .{ .carries = &.{ "WithReferenceImages" }, .shape = "MultipartForm", .endpoint = "/v1/images/edits" },
             },
             .models = &.{
                 .{
@@ -157,7 +160,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_output_path = "usage.completion_tokens",
             .usage_reasoning_path = "",
             .variants = &.{
-                .{ .carries = "TextOnly", .shape = "JSONGenerations", .endpoint = "/v1/images" },
+                .{ .carries = &.{ "TextOnly" }, .shape = "JSONGenerations", .endpoint = "/v1/images" },
             },
             .models = &.{
                 .{
@@ -225,7 +228,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_output_path = "",
             .usage_reasoning_path = "",
             .variants = &.{
-                .{ .carries = "TextOnly", .shape = "JSONGenerations", .endpoint = "/v1/images/generations" },
+                .{ .carries = &.{ "TextOnly" }, .shape = "JSONGenerations", .endpoint = "/v1/images/generations" },
             },
             .models = &.{
                 .{

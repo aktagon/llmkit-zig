@@ -59,6 +59,7 @@ pub const TranscriptionHandle = transcription.TranscriptionHandle;
 pub const TranscriptionResponse = transcription.TranscriptionResponse;
 pub const TranscriptSegment = transcription.TranscriptSegment;
 pub const Video = video.Video;
+pub const VideoInput = video.VideoInput;
 pub const VideoHandle = video.VideoHandle;
 pub const Music = music.Music;
 pub const MusicResponse = music.MusicResponse;

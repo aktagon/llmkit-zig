@@ -267,7 +267,7 @@ pub const Image = struct {
     /// The config's request variant for the image parts this builder holds
     /// (ADR-096). Text Parts do not select a variant.
     fn variant(self: Image, cfg: image_gen.ImageGenDef) request_variant.Error!image_gen.RequestVariant {
-        return request_variant.select(cfg.variants, self.image_count_, image_gen.with_reference_images);
+        return request_variant.select(cfg.variants, &.{request_variant.partsCarry(self.image_count_, image_gen.with_reference_images)});
     }
 
     /// The prompt the flat shapes send: the text Parts and then `prompt`,
