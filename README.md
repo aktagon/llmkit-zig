@@ -279,7 +279,7 @@ const resp = try client.text()
 std.debug.print("cache write {?d}, cache read {?d}\n", .{ resp.usage.cache_write, resp.usage.cache_read });
 ```
 
-`caching()` marks the request for prompt caching where the provider supports it (Anthropic `cache_control`). Creating a cache resource ahead of time (Google `cachedContents`) is not yet supported.
+`caching()` marks the request for prompt caching where the provider supports it. On Anthropic it adds `cache_control` to the system prompt. On Google it first creates a `cachedContents` resource holding the system prompt, then sends the request with a reference to it.
 
 ### Model catalogue
 
@@ -372,7 +372,6 @@ The `ptr` is yours: point it at whatever state the hook needs. It must outlive e
 - **Streaming** for the Anthropic and Bedrock chat shapes, and with `protocol(.responses)`. OpenAI-compatible providers and Google stream over Chat Completions.
 - **Video polling:** `Video.submit` returns the job id; fetching the result is not available.
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
-- **Cache resources:** creating a Google `cachedContents` resource ahead of time.
 - **Raw responses:** the `raw` field on responses is always null.
 - **Telemetry export:** the client does not send OpenTelemetry spans.
 
