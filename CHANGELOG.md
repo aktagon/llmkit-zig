@@ -43,6 +43,12 @@ First release.
 
 ### Added
 
+- **Video jobs can be polled.** `video().submit` returns a `VideoHandle`.
+  `handle.poll` makes one request and returns the job state; `handle.wait`
+  polls every 5 seconds until the job succeeds or fails, and gives up with
+  `error.PollTimeout` after 10 minutes. On success the result holds the
+  finished video: bytes for Google Veo and Vertex Veo, a URL for the other
+  providers, and the S3 URI for Bedrock.
 - **Asynchronous transcription jobs.** `transcription().submit` returns a
   `TranscriptionHandle`. `handle.poll` makes one request and returns the job
   state; `handle.wait` polls until the job succeeds or fails, and gives up with
@@ -138,9 +144,6 @@ These are not supported yet:
 - **Streaming with `protocol(.responses)`** returns empty text: Responses
   stream events are not read yet.
 
-- **Video generation is submit-only.** `video().submit` returns the provider's
-  job id, but there is no poll/wait runtime, so a caller must poll the provider
-  themselves.
 - **Streaming covers OpenAI-shape providers and Google, not Anthropic.**
   Anthropic's stream is event-typed rather than data-only. Non-streaming
   Anthropic requests are unaffected, as is streaming for the other providers.
