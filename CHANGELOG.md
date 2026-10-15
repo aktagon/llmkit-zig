@@ -47,6 +47,11 @@ First release.
   span per operation and hands the OTLP bytes to `tel.export`. `HttpExport` is
   the ready-made callback that POSTs to `<endpoint>/v1/traces`. Export is
   synchronous and fail-open: a collector error never fails the call.
+- **Live model catalogue.** `models().provider(p).list(arena, key)` reads the
+  provider's `/models` endpoint and follows pagination; `provider(p).get`
+  fetches one model. Results carry the known capabilities, and `raw()` keeps
+  the provider's record. A key without the models scope returns
+  `error.Scope`.
 - The middleware post event for a chat request (prompt, stream, and each agent
   round) now carries the reply's token usage.
 - **Conversation history.** `Text.history(messages)` sends earlier turns before
@@ -148,6 +153,4 @@ These are not supported yet:
   `error.UnsupportedWireShape` rather than silently returning empty text.
 
 Also not yet implemented: Google's `ResourceCaching` pre-hop (explicit
-`cache_control` caching works), the live `/models` catalogue send (the
-compiled-in catalogue and request assembly work), and polling asynchronous
-transcription jobs.
+`cache_control` caching works) and polling asynchronous transcription jobs.

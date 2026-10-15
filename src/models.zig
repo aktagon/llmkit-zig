@@ -6,19 +6,19 @@
 //!   * The OFFLINE compiled-catalogue walk — `Models.list` / `Models.get` /
 //!     `Models.withCapability` over the generated `compiled_in_models` slice.
 //!     Pure, no IO, no key.
-//!   * The `/models` list() URL + header ASSEMBLY seam — `ScopedModels.listRequest`
-//!     (delegating to `catalogueListRequest`). It reads the generated
-//!     `catalogueConfig` (endpoint + cursor_param) and `providers.spec().base_url`,
+//!   * The LIVE `/models` send — `ScopedModels.list` / `ScopedModels.get`.
+//!     `catalogueListRequest` assembles each page's request: it reads the
+//!     generated `catalogueConfig` (endpoint + cursor_param) and the base URL,
 //!     splices the QueryParamKey `?key=` for query-auth providers (Google), then
 //!     appends the pagination cursor as `&<cursor_param>=` — the same
 //!     `?key=...&pageToken=...` order Go/Python/Rust/Swift assemble (CR-003
-//!     cross-SDK catalogue-URL byte-parity). Auth headers come from the shared
-//!     `http.buildAuthHeaders` (never a provider-name switch).
+//!     cross-SDK catalogue-URL byte-parity). Headers come from the shared
+//!     `http.composeHeaders` (auth + required + custom, never a provider-name
+//!     switch). Each reply page is decoded by the generated parser the config's
+//!     `parser_kind` names, then enriched with the compiled-in capabilities.
 //!
-//! Zig has no live HTTP send, so the live pagination loop and `.live()`
-//! aggregation are OUT of scope — the catalogue-wire suite exercises only the
-//! request the list() path WOULD send (mirrors Rust's catalogue_wire driver,
-//! which builds the request without a live server). Mirrors `rust/src/models.rs`.
+//! The catalogue-wire suite asserts the assembled request; the response-wire
+//! `models-*` goldens assert the parsers. Mirrors `rust/src/models.rs`.
 
 const std = @import("std");
 
@@ -27,6 +27,10 @@ const providers = @import("providers/generated/providers.zig");
 const provider_info = @import("providers/generated/provider_info.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 const http = @import("http.zig");
+const json = @import("json.zig");
+const send = @import("send.zig");
+const middleware = @import("middleware.zig");
+const models_parsers = @import("providers/generated/models_parsers.zig");
 
 pub const Capability = @import("capability.zig").Capability;
 
@@ -34,16 +38,17 @@ pub const Capability = @import("capability.zig").Capability;
 ///
 pub const ModelInfo = @import("providers/generated/structs.zig").ModelInfo;
 
-/// Catalogue error sentinel. A provider without `hasModelsEndpoint`
-/// (no generated `catalogueConfig`) has nothing to fetch — `listRequest`
-/// reports `error.NotSupported` rather than assembling a bogus URL. The live
-/// `Scope` / `Unavailable` variants (Rust `CatalogueError`) belong to the
-/// send path, which Zig does not build.
-pub const CatalogueError = error{NotSupported};
+/// Catalogue errors (ADR-019, Rust `CatalogueError`):
+///   - `NotSupported` — the provider has no live models endpoint (no generated
+///     `catalogueConfig`), so there is nothing to fetch.
+///   - `Scope` — HTTP 403 whose body mentions scope or permission (OpenAI's
+///     `api.model.read` scope is the canonical case).
+///   - `Unavailable` — any other non-2xx reply, a transport failure, or a body
+///     the parser cannot decode.
+pub const CatalogueError = error{ NotSupported, Scope, Unavailable };
 
-/// The assembled `/models` list request for one page — the real request the
-/// list() path would send (URL + headers), returned instead of sent because
-/// Zig has no live transport. Method is always GET.
+/// The assembled `/models` list request for one page (URL + headers) — the
+/// request `ScopedModels.list` sends. Method is always GET.
 pub const CatalogueRequest = struct {
     method: http.Method,
     url: []const u8,
@@ -82,26 +87,97 @@ fn appendCursor(
     });
 }
 
-/// Assemble the `/models` list request for one page (URL + auth headers). The
-/// real seam the list() path would send; no network. `cursor` is "" for the
-/// first page. Errors with `NotSupported` when the provider has no live models
-/// endpoint (no generated `catalogueConfig`).
+/// Assemble the `/models` list request for one page (URL + headers). The
+/// request `ScopedModels.list` sends; no network. `cursor` is "" for the first
+/// page. `custom` are the client's custom headers (ADR-052), skipped when they
+/// collide with an auth or required header. Errors with `NotSupported` when
+/// the provider has no live models endpoint (no generated `catalogueConfig`).
 pub fn catalogueListRequest(
     arena: std.mem.Allocator,
     provider: providers.ProviderName,
     base_url_override: ?[]const u8,
     api_key: []const u8,
     cursor: []const u8,
+    custom: []const http.Header,
 ) !CatalogueRequest {
     const cfg = catalogue.catalogueConfig(provider) orelse return error.NotSupported;
+    return catalogueRequest(arena, provider, base_url_override, api_key, cfg.endpoint, cfg.cursor_param, cursor, custom);
+}
+
+fn catalogueRequest(
+    arena: std.mem.Allocator,
+    provider: providers.ProviderName,
+    base_url_override: ?[]const u8,
+    api_key: []const u8,
+    endpoint: []const u8,
+    cursor_param: []const u8,
+    cursor: []const u8,
+    custom: []const http.Header,
+) !CatalogueRequest {
     const url = try appendCursor(
         arena,
-        try buildCatalogueUrl(arena, provider, base_url_override, cfg.endpoint, api_key),
-        cfg.cursor_param,
+        try buildCatalogueUrl(arena, provider, base_url_override, endpoint, api_key),
+        cursor_param,
         cursor,
     );
-    const headers = try http.buildAuthHeaders(arena, provider, api_key);
+    const headers = try http.composeHeaders(arena, provider, api_key, &.{}, null, custom);
     return .{ .method = .GET, .url = url, .headers = headers };
+}
+
+// === Live send (mirrors rust/src/models.rs paginate / fetch_catalogue_url) ===
+
+/// One GET. A transport failure or non-2xx reply is `Unavailable`, except a
+/// 403 whose body names a scope or permission, which is `Scope`.
+fn fetchPage(transport: http.Transport, arena: std.mem.Allocator, req: CatalogueRequest) ![]const u8 {
+    const resp = transport.send(arena, .{ .method = req.method, .url = req.url, .headers = req.headers }) catch
+        return error.Unavailable;
+    if (resp.status >= 200 and resp.status < 300) return resp.body;
+    if (resp.status == 403 and scopeBodyMatches(resp.body)) return error.Scope;
+    return error.Unavailable;
+}
+
+fn scopeBodyMatches(body: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(body, "scope") != null or
+        std.ascii.indexOfIgnoreCase(body, "permission") != null;
+}
+
+/// Decode one reply page with the generated parser the config names (never a
+/// provider-name switch).
+fn dispatchParser(arena: std.mem.Allocator, kind: []const u8, body: []const u8) !models_parsers.ParsedModelsPage {
+    const value = std.json.parseFromSliceLeaky(json.Value, arena, body, .{}) catch return error.Unavailable;
+    if (std.mem.eql(u8, kind, "ParseAnthropicModels")) return models_parsers.parseAnthropicModelsResponse(arena, value);
+    if (std.mem.eql(u8, kind, "ParseGoogleModels")) return models_parsers.parseGoogleModelsResponse(arena, value);
+    if (std.mem.eql(u8, kind, "ParseOpenAICohortModels")) return models_parsers.parseOpenAICohortModelsResponse(arena, value);
+    return error.NotSupported;
+}
+
+/// A parsed wire record as a `ModelInfo`: capabilities from the compiled-in
+/// catalogue (empty for an id the SDK does not know), `raw` only under `raw()`.
+fn enrich(provider: providers.ProviderName, rec: models_parsers.ParsedModelRecord, keep_raw: bool) ModelInfo {
+    return .{
+        .id = rec.id,
+        .provider = provider,
+        .capabilities = catalogue.ontologyCapabilities(provider, rec.id) orelse &.{},
+        .display_name = rec.display_name,
+        .description = rec.description,
+        .context_window = rec.context_window,
+        .max_output = rec.max_output,
+        .created = rec.created,
+        .raw = if (keep_raw) rec.raw else null,
+    };
+}
+
+/// Fire `models_list` pre (vetoable) before `run`, and post after it with the
+/// outcome, once per call rather than once per page (Rust parity).
+fn observed(ctx: *const http.Ctx, provider: providers.ProviderName, model: []const u8, comptime T: type, result_fn: anytype, args: anytype) !T {
+    const mws = ctx.middlewares();
+    var ev = middleware.Event{ .op = .models_list, .phase = .pre, .provider = @tagName(provider), .model = model };
+    var veto_reason: []const u8 = "";
+    middleware.firePre(mws, ev, &veto_reason) catch return error.MiddlewareVeto;
+    const result = @call(.auto, result_fn, args);
+    if (result) |_| {} else |_| middleware.setEventError(&ev, .{ .transport = "models endpoint unavailable" });
+    middleware.firePost(mws, ev);
+    return result;
 }
 
 // === Offline compiled-catalogue walk ===
@@ -149,10 +225,10 @@ fn catalogueLookup(id: []const u8) ?ModelInfo {
 
 /// The catalogue builder reached via `client.models()`. `list`/`get` walk the
 /// compiled-in slice synchronously; `provider(p)` scopes to one provider's live
-/// URL-assembly seam; `withCapability` composes a capability filter. There is no
-/// `.live()` — Zig has no live transport.
+/// `/models` endpoint; `withCapability` composes a capability filter. Carries
+/// the client's send context (base URL, custom headers, middleware, transport).
 pub const Models = struct {
-    base_url: ?[]const u8 = null,
+    ctx: http.Ctx,
     cap_filter: ?Capability = null,
 
     ///
@@ -163,10 +239,9 @@ pub const Models = struct {
         return m;
     }
 
-    /// Scope the catalogue to a single provider; returns `ScopedModels` on which
-    /// `raw()` and `listRequest(...)` are reachable.
+    /// Scope the catalogue to a single provider's live endpoint.
     pub fn provider(self: Models, p: providers.ProviderName) ScopedModels {
-        return .{ .provider = p, .base_url = self.base_url, .cap_filter = self.cap_filter };
+        return .{ .provider = p, .ctx = self.ctx, .cap_filter = self.cap_filter };
     }
 
     /// The compiled-in catalogue, filtered by `withCapability` when set. Returns
@@ -183,13 +258,12 @@ pub const Models = struct {
     }
 };
 
-/// The single-provider live-catalogue sub-builder reached via `Models.provider(p)`.
-/// `raw()` opts into populating `ModelInfo.raw` (ADR-014); `listRequest` assembles
-/// the request the live list() would send. The live send/paginate/`get` are out of
-/// scope (no Zig transport).
+/// The single-provider live catalogue reached via `Models.provider(p)`. `list`
+/// pages through the provider's `/models` endpoint; `get` fetches one model;
+/// `raw()` keeps each wire record on `ModelInfo.raw` (ADR-014).
 pub const ScopedModels = struct {
     provider: providers.ProviderName,
-    base_url: ?[]const u8 = null,
+    ctx: http.Ctx,
     cap_filter: ?Capability = null,
     raw_flag: bool = false,
 
@@ -200,14 +274,88 @@ pub const ScopedModels = struct {
     }
 
     /// Assemble the `/models` list request for one page (URL + headers) — the
-    /// real seam the live list() would send. `cursor` is "" for the first page.
+    /// request `list` sends. `cursor` is "" for the first page.
     pub fn listRequest(
         self: ScopedModels,
         arena: std.mem.Allocator,
         api_key: []const u8,
         cursor: []const u8,
     ) !CatalogueRequest {
-        return catalogueListRequest(arena, self.provider, self.base_url, api_key, cursor);
+        return catalogueListRequest(arena, self.provider, self.ctx.base_url, api_key, cursor, self.ctx.customHeaders());
+    }
+
+    /// Every model the provider's live `/models` endpoint lists, following the
+    /// pagination cursor until the last page. Each record is enriched with the
+    /// compiled-in capabilities, then the `withCapability` filter applies.
+    /// Fires `models_list` middleware once per call. Arena-backed result.
+    pub fn list(self: ScopedModels, arena: std.mem.Allocator, api_key: []const u8) ![]ModelInfo {
+        return send.withTransport(&self.ctx, listWith, self, .{ arena, api_key });
+    }
+
+    /// `list` over an injected transport.
+    pub fn listWith(self: ScopedModels, transport: http.Transport, arena: std.mem.Allocator, api_key: []const u8) ![]ModelInfo {
+        const cfg = catalogue.catalogueConfig(self.provider) orelse return error.NotSupported;
+        const records = try observed(&self.ctx, self.provider, "", []const models_parsers.ParsedModelRecord, paginate, .{ self, transport, arena, api_key, cfg });
+        var out: std.ArrayList(ModelInfo) = .empty;
+        for (records) |rec| {
+            const info = enrich(self.provider, rec, self.raw_flag);
+            if (self.cap_filter) |c| if (!capsContain(info.capabilities, c)) continue;
+            try out.append(arena, info);
+        }
+        return out.toOwnedSlice(arena);
+    }
+
+    fn paginate(
+        self: ScopedModels,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        cfg: catalogue.CatalogueConfig,
+    ) ![]const models_parsers.ParsedModelRecord {
+        var all: std.ArrayList(models_parsers.ParsedModelRecord) = .empty;
+        var cursor: []const u8 = "";
+        while (true) {
+            const req = try self.listRequest(arena, api_key, cursor);
+            const page = try dispatchParser(arena, cfg.parser_kind, try fetchPage(transport, arena, req));
+            try all.appendSlice(arena, page.records);
+            if (page.next_cursor.len == 0) return all.items;
+            cursor = page.next_cursor;
+        }
+    }
+
+    /// One model from the provider's live endpoint (`<endpoint>/<id>`). An
+    /// unfiltered point lookup, like `Models.get`. Fires `models_list`
+    /// middleware with `id` as the model.
+    pub fn get(self: ScopedModels, arena: std.mem.Allocator, api_key: []const u8, id: []const u8) !ModelInfo {
+        return send.withTransport(&self.ctx, getWith, self, .{ arena, api_key, id });
+    }
+
+    /// `get` over an injected transport.
+    pub fn getWith(self: ScopedModels, transport: http.Transport, arena: std.mem.Allocator, api_key: []const u8, id: []const u8) !ModelInfo {
+        const cfg = catalogue.catalogueConfig(self.provider) orelse return error.NotSupported;
+        const rec = try observed(&self.ctx, self.provider, id, models_parsers.ParsedModelRecord, fetchOne, .{ self, transport, arena, api_key, id, cfg });
+        return enrich(self.provider, rec, self.raw_flag);
+    }
+
+    /// The single-record reply is the list record shape without the envelope,
+    /// so it is wrapped in the provider's list envelope and decoded by the same
+    /// parser (Rust `parse_single_record`).
+    fn fetchOne(
+        self: ScopedModels,
+        transport: http.Transport,
+        arena: std.mem.Allocator,
+        api_key: []const u8,
+        id: []const u8,
+        cfg: catalogue.CatalogueConfig,
+    ) !models_parsers.ParsedModelRecord {
+        const endpoint = try std.fmt.allocPrint(arena, "{s}/{s}", .{ cfg.endpoint, id });
+        const req = try catalogueRequest(arena, self.provider, self.ctx.base_url, api_key, endpoint, "", "", self.ctx.customHeaders());
+        const body = try fetchPage(transport, arena, req);
+        const envelope_key = if (std.mem.eql(u8, cfg.parser_kind, "ParseGoogleModels")) "models" else "data";
+        const wrapped = try std.fmt.allocPrint(arena, "{{\"{s}\":[{s}]}}", .{ envelope_key, body });
+        const page = try dispatchParser(arena, cfg.parser_kind, wrapped);
+        if (page.records.len == 0) return error.Unavailable;
+        return page.records[0];
     }
 };
 
@@ -229,6 +377,9 @@ pub const Providers = struct {
 
 // === Unit tests (offline compiled walk + URL assembly) ===
 
+fn testModels() Models {
+    return .{ .ctx = .{ .gpa = std.testing.allocator, .io = std.testing.io } };
+}
 
 
 
@@ -244,6 +395,115 @@ pub const Providers = struct {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// === Live catalogue send (ADR-019) ===
+
+/// Records the (op, phase) of every middleware event.
+const ModelsHook = struct {
+    seen: [8]struct { op: middleware.MiddlewareOp, phase: middleware.MiddlewarePhase } = undefined,
+    count: usize = 0,
+
+    fn call(ptr: *anyopaque, ev: *const middleware.Event) ?[]const u8 {
+        const self: *ModelsHook = @ptrCast(@alignCast(ptr));
+        if (self.count < self.seen.len) {
+            self.seen[self.count] = .{ .op = ev.op, .phase = ev.phase };
+            self.count += 1;
+        }
+        return null;
+    }
+};
+
+fn sentHeader(req: http.Request, name: []const u8) ?[]const u8 {
+    for (req.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    return null;
+}
 
 
 
