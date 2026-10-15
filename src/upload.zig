@@ -25,12 +25,19 @@ const send = @import("send.zig");
 const multipart = @import("multipart.zig");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
+const middleware = @import("middleware.zig");
 
 pub const ProviderName = providers.ProviderName;
 
+/// `UploadSourceMissing` / `UploadSourceConflict`: set exactly one of `bytes`
+/// and `path`. `UploadFilenameRequired`: `bytes` needs a `filename`. Rust
+/// reports these as `ValidationError{field: "Upload"}`.
 pub const UploadError = error{
     UnsupportedUploadProvider,
     MissingFileId,
+    UploadSourceMissing,
+    UploadSourceConflict,
+    UploadFilenameRequired,
 } || std.mem.Allocator.Error;
 
 /// A fixed, deterministic multipart boundary — the same choice (and the same
@@ -44,11 +51,31 @@ const boundary_str = "----llmkitZigUploadBoundary7MA4YWxkTrZu0gW";
 pub const File = @import("providers/generated/structs.zig").File;
 
 /// The public Upload builder. Immutable value type, like every other builder.
+/// Set the content with exactly one of `bytes` or `path`. Chain methods only
+/// record; `run` reads a `path` through the client's `io` into the arena.
 pub const Upload = struct {
     provider: ProviderName,
     ctx: http.Ctx,
-    filename_: []const u8 = "upload.bin",
-    mime_: []const u8 = "application/octet-stream",
+    filename_: ?[]const u8 = null,
+    mime_type_: []const u8 = "application/octet-stream",
+    bytes_: ?[]const u8 = null,
+    path_: ?[]const u8 = null,
+
+    /// The bytes to upload. Caller-owned; must outlive the terminal. Requires
+    /// `filename`. ADR-021 bare-noun replacer; mirrors Rust `bytes(data)`.
+    pub fn bytes(self: Upload, data: []const u8) Upload {
+        var s = self;
+        s.bytes_ = data;
+        return s;
+    }
+
+    /// A file to upload, read at `run` relative to the current directory. The
+    /// filename defaults to its base name. Mirrors Rust `path(p)`.
+    pub fn path(self: Upload, p: []const u8) Upload {
+        var s = self;
+        s.path_ = p;
+        return s;
+    }
 
     /// The filename reported to the provider (some providers infer the format
     /// from its extension). ADR-021 bare-noun replacer.
@@ -58,19 +85,29 @@ pub const Upload = struct {
         return s;
     }
 
-    /// The IANA media type of the bytes. ADR-021 bare-noun replacer.
-    pub fn mime(self: Upload, mime_type: []const u8) Upload {
+    /// The IANA media type of the content (default
+    /// `application/octet-stream`). ADR-021 bare-noun replacer; mirrors Rust
+    /// `mime_type(m)`.
+    pub fn mimeType(self: Upload, mime_type: []const u8) Upload {
         var s = self;
-        s.mime_ = mime_type;
+        s.mime_type_ = mime_type;
         return s;
     }
 
-    /// Upload `bytes` and return the provider file reference. Named `run`
+    /// Attach an observation + veto hook to this builder only (ADR-020); see
+    /// `Text.addMiddleware`.
+    pub fn addMiddleware(self: Upload, m: middleware.Middleware) Upload {
+        var s = self;
+        s.ctx = s.ctx.withMiddleware(m);
+        return s;
+    }
+
+    /// Upload the content and return the provider file reference. Named `run`
     /// because the builder already says what is happening (`client.upload()
-    /// .filename("q3.pdf").run(...)`) — the same terminal name Rust, Swift and
+    /// .path("q3.pdf").run(...)`) — the same terminal name Rust, Swift and
     /// Java use for this capability.
-    pub fn run(self: Upload, arena: std.mem.Allocator, api_key: []const u8, bytes: []const u8) !File {
-        return send.withTransport(&self.ctx, @TypeOf(self).runWith, self, .{ arena, api_key, bytes });
+    pub fn run(self: Upload, arena: std.mem.Allocator, api_key: []const u8) !File {
+        return send.withTransport(&self.ctx, @TypeOf(self).runWith, self, .{ arena, api_key });
     }
 
     /// `run` over an injected transport (the seam tests mock).
@@ -79,12 +116,12 @@ pub const Upload = struct {
         transport: http.Transport,
         arena: std.mem.Allocator,
         api_key: []const u8,
-        bytes: []const u8,
     ) !File {
         const cfg = request_defs.fileUploadConfig(self.provider) orelse
             return error.UnsupportedUploadProvider;
 
-        const body = try encodeMultipart(arena, cfg, self.filename_, self.mime_, bytes);
+        const src = try self.content(arena);
+        const body = try encodeMultipart(arena, cfg, src.filename, self.mime_type_, src.bytes);
 
         var extra: std.ArrayList(http.Header) = .empty;
         if (cfg.beta_header.len > 0)
@@ -108,6 +145,27 @@ pub const Upload = struct {
             .name = stringAt(parsed, cfg.response_name_path) orelse "",
             .mime_type = stringAt(parsed, cfg.response_mime_path) orelse "",
         };
+    }
+
+    const Content = struct { filename: []const u8, bytes: []const u8 };
+
+    /// The bytes and filename to send: the `bytes` as given, or the `path` read
+    /// into `arena` with its base name as the default filename. The rules
+    /// match Rust `upload_run`.
+    fn content(self: Upload, arena: std.mem.Allocator) !Content {
+        const has_bytes = self.bytes_ != null and self.bytes_.?.len > 0;
+        const has_path = self.path_ != null and self.path_.?.len > 0;
+        if (!has_bytes and !has_path) return error.UploadSourceMissing;
+        if (has_bytes and has_path) return error.UploadSourceConflict;
+        if (has_bytes) {
+            const name = self.filename_ orelse return error.UploadFilenameRequired;
+            if (name.len == 0) return error.UploadFilenameRequired;
+            return .{ .filename = name, .bytes = self.bytes_.? };
+        }
+        const p = self.path_.?;
+        const data = try std.Io.Dir.cwd().readFileAlloc(self.ctx.io, p, arena, .unlimited);
+        const name = if (self.filename_) |n| (if (n.len > 0) n else std.fs.path.basename(p)) else std.fs.path.basename(p);
+        return .{ .filename = name, .bytes = data };
     }
 };
 
@@ -155,6 +213,79 @@ const testing = std.testing;
 fn testUpload(gpa: std.mem.Allocator, provider: ProviderName) Upload {
     return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = testing.io } };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
