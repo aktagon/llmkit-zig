@@ -366,6 +366,19 @@ _ = logged;
 
 The `ptr` is yours: point it at whatever state the hook needs. It must outlive every client that holds it.
 
+## Telemetry
+
+`addTelemetry` turns on OpenTelemetry export. Each operation the client performs produces one OTLP span (OTEL GenAI attributes: operation, provider, model, token usage, error type). The span is handed to your `export` callback when the call returns. `HttpExport` is a ready-made callback that POSTs each span to `<endpoint>/v1/traces`.
+
+```zig
+const collector_headers = [_]llmkit.http.Header{.{ .name = "x-honeycomb-team", .value = ingest_key }};
+var exporter = try llmkit.HttpExport.init(gpa, io, "http://localhost:4318", &collector_headers);
+var tel = llmkit.Telemetry{ .@"export" = exporter.exporter() };
+const traced = client.addTelemetry(&tel);
+```
+
+The export is synchronous and fail-open: a collector error never fails the call. `HttpExport` waits at most 5 seconds per span, so use it for low volume. For high volume, pass your own `llmkit.TelemetryExport` that queues the bytes into your OTEL pipeline. `tel` and `exporter` must outlive the client.
+
 ## Not yet supported
 
 - **AWS Bedrock:** requests are not signed, so Bedrock calls cannot be sent.
@@ -374,7 +387,6 @@ The `ptr` is yours: point it at whatever state the hook needs. It must outlive e
 - **Transcription jobs:** `transcribe` works; asynchronous transcription jobs cannot be polled.
 - **Cache resources:** creating a Google `cachedContents` resource ahead of time.
 - **Raw responses:** the `raw` field on responses is always null.
-- **Telemetry export:** the client does not send OpenTelemetry spans.
 
 ## Mirror
 

@@ -43,6 +43,12 @@ First release.
 
 ### Added
 
+- **Telemetry export.** `Client.addTelemetry(&tel)` emits one OpenTelemetry
+  span per operation and hands the OTLP bytes to `tel.export`. `HttpExport` is
+  the ready-made callback that POSTs to `<endpoint>/v1/traces`. Export is
+  synchronous and fail-open: a collector error never fails the call.
+- The middleware post event for a chat request (prompt, stream, and each agent
+  round) now carries the reply's token usage.
 - **Conversation history.** `Text.history(messages)` sends earlier turns before
   the prompt. An assistant `Message` that carries the `provider_turn` from an
   earlier response is sent back exactly as the provider returned it, so
@@ -129,7 +135,6 @@ These are not supported yet:
   them.
 - **Raw responses.** The `raw` field on responses is always null; there is no
   way to request it.
-- **Telemetry export.** The client does not send OpenTelemetry spans.
 - **Streaming with `protocol(.responses)`** returns empty text: Responses
   stream events are not read yet.
 

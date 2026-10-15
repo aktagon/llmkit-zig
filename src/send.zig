@@ -69,7 +69,37 @@ pub const Args = struct {
     /// Stamped onto the middleware event so a hook can see which model was
     /// asked for. Empty when the capability has no model in play.
     model: []const u8 = "",
+    /// Who fires the SUCCESS post event. A chat send sets `.by_caller` and
+    /// fires it with `firePostUsage` after decoding, so the event carries the
+    /// reply's token usage, as in Go and Rust (telemetry exports it). Failure
+    /// posts (transport error, non-2xx) always fire here.
+    post: enum { on_reply, by_caller } = .on_reply,
 };
+
+/// The pre-phase event this send fires: op, provider, and model.
+fn baseEvent(args: Args) middleware.Event {
+    return .{
+        .op = args.op,
+        .phase = .pre,
+        .provider = @tagName(args.provider),
+        .model = args.model,
+    };
+}
+
+/// Fire the success post for a `.by_caller` send, carrying the decoded reply's
+/// usage. `input`/`output` are null when the provider did not report them.
+pub fn firePostUsage(args: Args, input: ?i64, output: ?i64) void {
+    var ev = baseEvent(args);
+    ev.usage = .{ .input = input, .output = output };
+    middleware.firePost(args.ctx.middlewares(), ev);
+}
+
+/// Fire the post for a `.by_caller` send whose 2xx reply could not be decoded.
+pub fn firePostDecodeError(args: Args) void {
+    var ev = baseEvent(args);
+    middleware.setEventError(&ev, .{ .decoding = "could not decode the provider reply" });
+    middleware.firePost(args.ctx.middlewares(), ev);
+}
 
 /// POST a JSON body and decode the JSON reply.
 pub fn postJson(
@@ -96,7 +126,10 @@ pub fn postJsonWithText(
     body: json.Value,
 ) !Reply {
     const raw = try postRaw(transport, arena, args, try json.stringify(arena, body), "application/json");
-    const value = std.json.parseFromSliceLeaky(json.Value, arena, raw, .{}) catch return error.ApiError;
+    const value = std.json.parseFromSliceLeaky(json.Value, arena, raw, .{}) catch {
+        if (args.post == .by_caller) firePostDecodeError(args);
+        return error.ApiError;
+    };
     return .{ .text = raw, .value = value };
 }
 
@@ -145,12 +178,7 @@ fn roundTrip(
     content_type: ?[]const u8,
 ) ![]const u8 {
     const mws = args.ctx.middlewares();
-    const base = middleware.Event{
-        .op = args.op,
-        .phase = .pre,
-        .provider = @tagName(args.provider),
-        .model = args.model,
-    };
+    const base = baseEvent(args);
 
     // Pre-phase veto happens BEFORE the URL is assembled, so a vetoed call
     // never even materializes a key-bearing URL in memory.
@@ -193,7 +221,7 @@ fn roundTrip(
         return error.ApiError;
     }
 
-    middleware.firePost(mws, base);
+    if (args.post == .on_reply) middleware.firePost(mws, base);
     return resp.body;
 }
 
