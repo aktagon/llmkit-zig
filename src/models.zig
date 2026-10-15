@@ -293,7 +293,7 @@ pub const ScopedModels = struct {
     }
 
     /// `list` over an injected transport.
-    pub fn listWith(self: ScopedModels, transport: http.Transport, arena: std.mem.Allocator, api_key: []const u8) ![]ModelInfo {
+    fn listWith(self: ScopedModels, transport: http.Transport, arena: std.mem.Allocator, api_key: []const u8) ![]ModelInfo {
         const cfg = catalogue.catalogueConfig(self.provider) orelse return error.NotSupported;
         const records = try observed(&self.ctx, self.provider, "", []const models_parsers.ParsedModelRecord, paginate, .{ self, transport, arena, api_key, cfg });
         var out: std.ArrayList(ModelInfo) = .empty;
@@ -331,7 +331,7 @@ pub const ScopedModels = struct {
     }
 
     /// `get` over an injected transport.
-    pub fn getWith(self: ScopedModels, transport: http.Transport, arena: std.mem.Allocator, api_key: []const u8, id: []const u8) !ModelInfo {
+    fn getWith(self: ScopedModels, transport: http.Transport, arena: std.mem.Allocator, api_key: []const u8, id: []const u8) !ModelInfo {
         const cfg = catalogue.catalogueConfig(self.provider) orelse return error.NotSupported;
         const rec = try observed(&self.ctx, self.provider, id, models_parsers.ParsedModelRecord, fetchOne, .{ self, transport, arena, api_key, id, cfg });
         return enrich(self.provider, rec, self.raw_flag);
@@ -504,6 +504,34 @@ fn sentHeader(req: http.Request, name: []const u8) ?[]const u8 {
     for (req.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     return null;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
