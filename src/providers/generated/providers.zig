@@ -172,7 +172,7 @@ pub fn spec(name: ProviderName) ProviderSpec {
             .reasoning_tokens_path = "usage.output_tokens_details.thinking_tokens",
             .finish_reason_path = "stop_reason",
             .finish_message_path = "",
-            .stream_finish_reason_path = "message_stop:stop_reason",
+            .stream_finish_reason_path = "message_delta:delta.stop_reason",
             .stream_finish_message_path = "",
             .wraps_options_in = "",
             .safety_settings_wire_path = "",
