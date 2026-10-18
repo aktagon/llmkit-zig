@@ -20,6 +20,7 @@ pub const json_inline_refs = "JSONInlineRefs";
 /// Deprecated: no provider accepts this since 2026-10-15 (Vertex Imagen shut down, BUG-101); removed at the next major.
 pub const json_predict = "JSONPredict";
 pub const json_generations = "JSONGenerations";
+pub const json_generations_input_refs = "JSONGenerationsInputRefs";
 
 /// One wire request of an image or video config, keyed by the inputs it
 /// carries (ADR-096). `shape` is empty on a video variant; an empty
@@ -161,6 +162,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
             .usage_reasoning_path = "",
             .variants = &.{
                 .{ .carries = &.{ "TextOnly" }, .shape = "JSONGenerations", .endpoint = "/v1/images" },
+                .{ .carries = &.{ "WithReferenceImages" }, .shape = "JSONGenerationsInputRefs", .endpoint = "/v1/images" },
             },
             .models = &.{
                 .{
@@ -169,7 +171,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "bytedance-seed/seedream-5-0-flash",
@@ -177,7 +179,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "google/gemini-2.5-flash-image",
@@ -185,7 +187,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "google/gemini-3-pro-image",
@@ -193,7 +195,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "google/gemini-3.1-flash-image",
@@ -201,7 +203,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "google/gemini-3.1-flash-lite-image",
@@ -209,7 +211,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "meta/muse-image",
@@ -225,7 +227,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "openai/gpt-5-image-mini",
@@ -233,7 +235,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "openai/gpt-5.4-image-2",
@@ -241,7 +243,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "openai/gpt-image-2",
@@ -249,7 +251,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "openai/gpt-image-2.5-sunburst",
@@ -257,7 +259,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
                 .{
                     .model_id = "tencent/hy-image-v3.5-preview",
@@ -265,7 +267,7 @@ pub fn imageGenConfig(provider: ProviderName) ?ImageGenDef {
                     .aspect_ratios = &.{},
                     .image_sizes = &.{},
                     .max_input_images = 0,
-                    .supports_image_input = false,
+                    .supports_image_input = true,
                 },
             },
         },
