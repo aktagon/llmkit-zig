@@ -245,6 +245,10 @@ fn classifyVideo(arena: std.mem.Allocator, shape: []const u8, raw: json.Value) !
         return byString(stringAt(raw, "output.task_status"), &.{"SUCCEEDED"}, &.{ "FAILED", "CANCELED" }, "");
     if (eq(u8, shape, "VideoTogether"))
         return byString(stringAt(raw, "status"), &.{"completed"}, &.{ "failed", "cancelled" }, "");
+    if (eq(u8, shape, "VideoOpenRouter")) {
+        const status = stringAt(raw, "status");
+        return byString(status, &.{"completed"}, &.{ "failed", "cancelled", "expired" }, firstNonEmpty(stringAt(raw, "error"), status));
+    }
     if (eq(u8, shape, "VideoZhipu"))
         return byString(stringAt(raw, "task_status"), &.{"SUCCESS"}, &.{"FAIL"}, "");
     if (eq(u8, shape, "VideoMinimax"))
@@ -303,6 +307,10 @@ fn videoResult(arena: std.mem.Allocator, vg: video_gen.VideoGenDef, raw: json.Va
     if (eq(u8, shape, "VideoZhipu")) return urlResponse(arena, vg, stringAt(raw, "video_result[0].url"), 0);
     if (eq(u8, shape, "VideoVidu")) return urlResponse(arena, vg, stringAt(raw, "creations[0].url"), 0);
     if (eq(u8, shape, "VideoPixVerse")) return urlResponse(arena, vg, stringAt(raw, "Resp.url"), 0);
+    // Download delivery: unsigned_urls[0] needs the API key, so the download
+    // hop fetches it with the auth headers. The signed urls[] array is a
+    // secret and is never read.
+    if (eq(u8, shape, "VideoOpenRouter")) return urlResponse(arena, vg, stringAt(raw, "unsigned_urls[0]"), 0);
     if (eq(u8, shape, "VideoTogether")) return urlResponse(arena, vg, stringAt(raw, "outputs.video_url"), 0);
     if (eq(u8, shape, "VideoQwen")) return urlResponse(arena, vg, stringAt(raw, "output.video_url"), 0);
     if (eq(u8, shape, "VideoBedrock")) return urlResponse(arena, vg, stringAt(raw, "outputDataConfig.s3OutputDataConfig.s3Uri"), 0);
