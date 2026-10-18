@@ -147,7 +147,7 @@ const VideoAdapter = struct {
         else
             try videoResult(arena, vg, pb.value);
 
-        // Veo, Vertex Veo and Bedrock must carry their output when done: an
+        // Veo, Vertex Veo, Bedrock and OpenRouter must carry their output when done: an
         // empty success would hand the caller nothing to fetch. Mirrors the
         // Rust done-but-empty guards (the other shapes return an empty list).
         if (requiresOutput(vg.wire_shape) and
@@ -230,7 +230,8 @@ const VideoAdapter = struct {
 
 fn requiresOutput(shape: []const u8) bool {
     const eq = std.mem.eql;
-    return eq(u8, shape, "VideoVeo") or eq(u8, shape, "VideoVertexVeo") or eq(u8, shape, "VideoBedrock");
+    return eq(u8, shape, "VideoVeo") or eq(u8, shape, "VideoVertexVeo") or eq(u8, shape, "VideoBedrock") or
+        eq(u8, shape, "VideoOpenRouter");
 }
 
 fn parseBody(arena: std.mem.Allocator, body: []const u8) !json.Value {
