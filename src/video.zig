@@ -213,8 +213,9 @@ pub const Video = struct {
             return buildVeoBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoBedrock"))
             return buildBedrockBody(arena, self, prompt_text);
-        // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu /
-        // VideoOpenRouter.
+        if (std.mem.eql(u8, shape, "VideoOpenRouter"))
+            return buildOpenRouterBody(arena, self, prompt_text);
+        // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu.
         return buildSharedBody(arena, self, prompt_text);
     }
 
@@ -362,6 +363,36 @@ fn buildSharedBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) Bui
     return body;
 }
 
+/// The OpenRouter submit body: `{model, prompt}` plus, for image-to-video
+/// (HANDOFF-091), `frame_images` with each frame as an OpenRouter
+/// ContentPartImage plus `frame_type`, first_frame then last_frame (live probe
+/// 2026-10-18; openrouter.ai/openapi.json). Mirrors Go's VideoShapeOpenRouter arm.
+fn buildOpenRouterBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) BuildError!json.Value {
+    var body = json.object();
+    if (vid.model_) |m| try json.set(arena, &body, "model", .{ .string = m });
+    try json.set(arena, &body, "prompt", .{ .string = prompt });
+    if (vid.part_count_ > 0) {
+        var frames = json.array(arena);
+        try frames.array.append(try openRouterFrame(arena, vid.parts_[0], "first_frame"));
+        if (vid.last_frame_) |last| try frames.array.append(try openRouterFrame(arena, last, "last_frame"));
+        try json.set(arena, &body, "frame_images", frames);
+    }
+    return body;
+}
+
+/// One OpenRouter frame_images item.
+fn openRouterFrame(arena: std.mem.Allocator, img: VideoInput, frame_type: []const u8) BuildError!json.Value {
+    const mime = if (img.mime.len == 0) "image/png" else img.mime;
+    const url = try std.fmt.allocPrint(arena, "data:{s};base64,{s}", .{ mime, try base64Encode(arena, img.bytes) });
+    var image_url = json.object();
+    try json.set(arena, &image_url, "url", .{ .string = url });
+    var frame = json.object();
+    try json.set(arena, &frame, "type", .{ .string = "image_url" });
+    try json.set(arena, &frame, "image_url", image_url);
+    try json.set(arena, &frame, "frame_type", .{ .string = frame_type });
+    return frame;
+}
+
 /// The DashScope (Qwen) submit body: the prompt nests under an `input` object —
 /// `{model, input:{prompt}}`. The load-bearing `X-DashScope-Async: enable`
 /// header is a send-time concern (the async runtime), not part of the body.
@@ -481,6 +512,11 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
 
 
 
