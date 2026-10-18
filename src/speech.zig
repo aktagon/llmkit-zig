@@ -5,7 +5,8 @@
 //!   - `Speech.buildSpeechBody` produces the request body per the provider's
 //!     generated `wire_shape` fact (SpeechInworld -> the flat `{text, voiceId,
 //!     modelId, audioConfig, deliveryMode}` body; SpeechOpenAI -> the flat
-//!     `{model, input, voice, response_format}` body) — never a provider-name
+//!     `{model, input, voice, response_format}` body; SpeechGemini and
+//!     SpeechMiniMax have their own builders below) — never a provider-name
 //!     switch. Slice 2 sends fixed shape defaults (Inworld LINEAR16/22050 ->
 //!     WAV + BALANCED delivery; OpenAI response_format mp3); format/voice-rate
 //!     selection is a later slice (ADR-049 OQ-5 / ADR-051).
@@ -83,7 +84,10 @@ pub const SpeechLine = struct {
     style: ?[]const u8 = null,
     text: []const u8,
 };
-pub const ParseError = error{ UnsupportedSpeechProvider, InvalidSpeechResponse } || std.mem.Allocator.Error;
+/// `ApiError` is a hexEnvelope reply (MiniMax) whose `base_resp.status_code`
+/// is nonzero on an HTTP 200; Zig errors carry no payload, so `status_msg`
+/// does not travel with it (the other SDKs put it on their API error).
+pub const ParseError = error{ UnsupportedSpeechProvider, InvalidSpeechResponse, ApiError } || std.mem.Allocator.Error;
 
 /// The public Speech builder. Immutable value type: each chain method returns a
 /// fresh copy, so a forked chain never mutates its parent (the `Text`/`Image`
@@ -201,6 +205,8 @@ pub const Speech = struct {
             return buildOpenAISpeechBody(arena, self, text);
         if (std.mem.eql(u8, cfg.wire_shape, "SpeechGemini"))
             return buildGeminiSpeechBody(arena, self, text);
+        if (std.mem.eql(u8, cfg.wire_shape, "SpeechMiniMax"))
+            return buildMiniMaxSpeechBody(arena, self, text);
         return buildInworldSpeechBody(arena, self, text);
     }
 
@@ -240,9 +246,15 @@ pub const Speech = struct {
             return error.UnsupportedSpeechProvider;
         const body = try self.buildSpeechBody(arena, text);
 
+        // MiniMax serves speech off a different host than chat: the generated
+        // `base_url` fact (HANDOFF-094). A client base-URL override still wins.
+        var ctx = self.ctx;
+        if (ctx.base_url == null and cfg.base_url.len > 0)
+            ctx.base_url = cfg.base_url;
+
         const raw = try send.postRaw(transport, arena, .{
             .provider = self.provider,
-            .ctx = &self.ctx,
+            .ctx = &ctx,
             .api_key = api_key,
             .endpoint = cfg.gen_endpoint,
             .op = .speech_generation,
@@ -285,6 +297,19 @@ fn buildOpenAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8)
     try json.set(arena, &body, "response_format", .{ .string = "mp3" });
     // A style is sent as `instructions` (BUG-091), which gpt-4o-mini-tts accepts.
     if (sp.style_) |st| if (st.len > 0) try json.set(arena, &body, "instructions", .{ .string = st });
+    return body;
+}
+
+/// The MiniMax `/v1/t2a_v2` request body (HANDOFF-094): `{model, text,
+/// voice_setting:{voice_id}}`, only the fields the reference marks required.
+/// stream, output_format (hex) and audio_setting (mp3) take their defaults.
+fn buildMiniMaxSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8) BuildError!json.Value {
+    var body = json.object();
+    if (sp.model_) |m| try json.set(arena, &body, "model", .{ .string = m });
+    try json.set(arena, &body, "text", .{ .string = text });
+    var voice_setting = json.object();
+    if (sp.voice_) |v| try json.set(arena, &voice_setting, "voice_id", .{ .string = v });
+    try json.set(arena, &body, "voice_setting", voice_setting);
     return body;
 }
 
@@ -386,6 +411,9 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, bod
     if (std.mem.eql(u8, cfg.audio_response_encoding, "base64InteractionSteps")) {
         return parseInteractionSteps(arena, mime, body);
     }
+    if (std.mem.eql(u8, cfg.audio_response_encoding, "hexEnvelope")) {
+        return parseHexEnvelope(arena, mime, body);
+    }
 
     // base64Envelope: {"audioContent": "<base64>", "usage": {...}}.
     const parsed = json.parse(arena, body) catch return error.InvalidSpeechResponse;
@@ -432,6 +460,28 @@ fn parseInteractionSteps(arena: std.mem.Allocator, fallback_mime: []const u8, bo
     else
         fallback_mime;
     return .{ .audio = .{ .mime_type = mime, .bytes = decoded }, .usage = .{}, .finish_reason = null };
+}
+
+/// Decode a MiniMax t2a_v2 reply (HANDOFF-094): `{"data": {"audio": "<hex>"},
+/// "base_resp": {"status_code", "status_msg"}}`. A nonzero `status_code` is
+/// `ApiError`, even on an HTTP 200. A success with missing audio, or invalid
+/// hex, is a decoding error (HANDOFF-036 A5).
+fn parseHexEnvelope(arena: std.mem.Allocator, fallback_mime: []const u8, body: []const u8) ParseError!SpeechResponse {
+    const parsed = json.parse(arena, body) catch return error.InvalidSpeechResponse;
+    defer parsed.deinit();
+
+    if (json.getPath(parsed.value, "base_resp.status_code")) |code| switch (code) {
+        .integer => |n| if (n != 0) return error.ApiError,
+        else => {},
+    };
+    const hex = if (json.getPath(parsed.value, "data.audio")) |v| switch (v) {
+        .string => |str| str,
+        else => return error.InvalidSpeechResponse,
+    } else return error.InvalidSpeechResponse;
+    if (hex.len == 0 or hex.len % 2 != 0) return error.InvalidSpeechResponse;
+    const out = try arena.alloc(u8, hex.len / 2);
+    const decoded = std.fmt.hexToBytes(out, hex) catch return error.InvalidSpeechResponse;
+    return .{ .audio = .{ .mime_type = fallback_mime, .bytes = decoded }, .usage = .{}, .finish_reason = null };
 }
 
 /// Read a string field off an object Value; null when absent or not a string.
@@ -595,6 +645,41 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
