@@ -1117,6 +1117,12 @@ fn testCtx() http.Ctx {
 
 
 
+
+
+
+
+
+
 // === HANDOFF-086: text Parts, mask, safety knobs, raw, builder middleware ===
 
 fn testImage(gpa: std.mem.Allocator, provider: ProviderName) Image {
