@@ -5,9 +5,9 @@
 //! One pure seam the request-wire goldens assert:
 //!   - `Video.buildSubmitBody` produces the SUBMIT request body per the
 //!     provider's generated `wire_shape` fact — never a provider-name switch.
-//!     The eleven video providers collapse to five submit-body shapes:
+//!     The twelve video providers collapse to five submit-body shapes:
 //!       * shared `{model, prompt}` (VideoGrok, VideoZhipu, VideoTogether,
-//!         VideoMinimax, VideoVidu). An image-to-video seed frame (BUG-010,
+//!         VideoMinimax, VideoVidu, VideoOpenRouter). An image-to-video seed frame (BUG-010,
 //!         grok-imagine-video only) inlines as a `data:<mime>;base64,<b64>`
 //!         URL at `image.url`, the same encoding the Grok image-edit path uses.
 //!       * nested `{model, input:{prompt}}` (VideoQwen / DashScope).
@@ -213,7 +213,8 @@ pub const Video = struct {
             return buildVeoBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoBedrock"))
             return buildBedrockBody(arena, self, prompt_text);
-        // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu.
+        // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu /
+        // VideoOpenRouter.
         return buildSharedBody(arena, self, prompt_text);
     }
 
