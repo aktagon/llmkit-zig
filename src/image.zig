@@ -306,6 +306,8 @@ pub const Image = struct {
             return buildXAIBody(arena, self, parts, text_prompt);
         if (eq(u8, shape, image_gen.json_generations))
             return buildRecraftGenBody(arena, self, text_prompt);
+        if (eq(u8, shape, image_gen.json_generations_input_refs))
+            return buildInputRefsBody(arena, self, parts, text_prompt);
         return error.UnsupportedImageProvider;
     }
 
@@ -616,6 +618,31 @@ fn buildRecraftGenBody(arena: std.mem.Allocator, img: Image, prompt: []const u8)
     return body;
 }
 
+/// The Recraft generations body plus `input_references`: each image part, in
+/// caller order, as an OpenRouter ContentPartImage `{type:"image_url",
+/// image_url:{url}}` with the bytes as a base64 data URL (live probe
+/// 2026-10-18). Mirrors Go `dispatchImageHTTP` for JSONGenerationsInputRefs.
+fn buildInputRefsBody(arena: std.mem.Allocator, img: Image, parts: []const ImagePart, prompt: []const u8) BuildError!json.Value {
+    var body = try buildRecraftGenBody(arena, img, prompt);
+    var refs = json.array(arena);
+    for (parts) |part| {
+        const p = switch (part) {
+            .image => |x| x,
+            .text => continue,
+        };
+        const mime = if (p.mime.len == 0) "image/png" else p.mime;
+        const url = try std.fmt.allocPrint(arena, "data:{s};base64,{s}", .{ mime, try base64Encode(arena, p.bytes) });
+        var image_url = json.object();
+        try json.set(arena, &image_url, "url", .{ .string = url });
+        var ref = json.object();
+        try json.set(arena, &ref, "type", .{ .string = "image_url" });
+        try json.set(arena, &ref, "image_url", image_url);
+        try refs.array.append(ref);
+    }
+    try json.set(arena, &body, "input_references", refs);
+    return body;
+}
+
 /// Project a parsed provider image REPLY into the normalized `ImageResponse`,
 /// dispatched on the provider's generated `response_shape` fact (BUG-024) —
 /// never a provider-name switch. Usage is read through the config's dotted
@@ -756,6 +783,27 @@ fn base64Decode(arena: std.mem.Allocator, b64: []const u8) ![]const u8 {
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
