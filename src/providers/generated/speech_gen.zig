@@ -17,9 +17,11 @@ pub const SpeechModelDef = struct {
 
 pub const SpeechGenDef = struct {
     wire_shape: []const u8,
-    /// audio_response_encoding: "base64Envelope" | "rawBody" | "base64InteractionSteps" (ADR-051).
+    /// audio_response_encoding: "base64Envelope" | "rawBody" | "base64InteractionSteps" | "hexEnvelope" (ADR-051).
     audio_response_encoding: []const u8,
     gen_endpoint: []const u8,
+    /// Speech API base when it differs from the chat base; "" = use chat base.
+    base_url: []const u8,
     models: []const SpeechModelDef,
 };
 
@@ -29,6 +31,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
             .wire_shape = "SpeechGemini",
             .audio_response_encoding = "base64InteractionSteps",
             .gen_endpoint = "/v1beta/interactions",
+            .base_url = "",
             .models = &.{
                 .{
                     .model_id = "gemini-3.8-flash-lite-tts",
@@ -52,6 +55,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
             .wire_shape = "SpeechInworld",
             .audio_response_encoding = "base64Envelope",
             .gen_endpoint = "/tts/v1/voice",
+            .base_url = "",
             .models = &.{
                 .{
                     .model_id = "inworld-tts-1.5-max",
@@ -79,10 +83,51 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                 },
             },
         },
+        .minimax => .{
+            .wire_shape = "SpeechMiniMax",
+            .audio_response_encoding = "hexEnvelope",
+            .gen_endpoint = "/v1/t2a_v2",
+            .base_url = "https://api.minimax.io",
+            .models = &.{
+                .{
+                    .model_id = "speech-2.6-hd",
+                    .label = "MiniMax Speech 2.6 HD",
+                    .output_mime = "audio/mpeg",
+                    .sample_rate_hz = 0,
+                    .max_speakers = 0,
+                    .supports_speech_style = false,
+                },
+                .{
+                    .model_id = "speech-2.6-turbo",
+                    .label = "MiniMax Speech 2.6 Turbo",
+                    .output_mime = "audio/mpeg",
+                    .sample_rate_hz = 0,
+                    .max_speakers = 0,
+                    .supports_speech_style = false,
+                },
+                .{
+                    .model_id = "speech-2.8-hd",
+                    .label = "MiniMax Speech 2.8 HD",
+                    .output_mime = "audio/mpeg",
+                    .sample_rate_hz = 0,
+                    .max_speakers = 0,
+                    .supports_speech_style = false,
+                },
+                .{
+                    .model_id = "speech-2.8-turbo",
+                    .label = "MiniMax Speech 2.8 Turbo",
+                    .output_mime = "audio/mpeg",
+                    .sample_rate_hz = 0,
+                    .max_speakers = 0,
+                    .supports_speech_style = false,
+                },
+            },
+        },
         .openai => .{
             .wire_shape = "SpeechOpenAI",
             .audio_response_encoding = "rawBody",
             .gen_endpoint = "/v1/audio/speech",
+            .base_url = "",
             .models = &.{
                 .{
                     .model_id = "gpt-4o-mini-tts",
@@ -114,6 +159,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
             .wire_shape = "SpeechOpenAI",
             .audio_response_encoding = "rawBody",
             .gen_endpoint = "/v1/audio/speech",
+            .base_url = "",
             .models = &.{
                 .{
                     .model_id = "elevenlabs/eleven-v3",
