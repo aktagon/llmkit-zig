@@ -9,10 +9,10 @@ pub const SpeechModelDef = struct {
     output_mime: []const u8,
     /// ADR-037 advisory fact (queryable, never gated); 0 when unverified.
     sample_rate_hz: i64,
-    /// Speakers a multi-speaker request declares; 0 = one voice only (BUG-091).
-    max_speakers: i64,
-    /// Whether a style (style, styled lines) is sent to this model (BUG-091).
-    supports_speech_style: bool,
+    /// Speakers the model takes (1 or 2); null = unknown, which sends (decision 009).
+    max_speakers: ?i64,
+    /// Whether the provider accepts a style; null = unknown, only false blocks (decision 009).
+    supports_speech_style: ?bool,
 };
 
 pub const SpeechGenDef = struct {
@@ -23,6 +23,10 @@ pub const SpeechGenDef = struct {
     models: []const SpeechModelDef,
     /// Speech API base when it differs from the chat base; "" = use chat base.
     base_url: []const u8,
+    /// llmkit's body for this config can carry a style; false rejects every style (HANDOFF-099).
+    carries_speech_style: bool,
+    /// The config has a multi-speaker body; false rejects every speaker request (HANDOFF-099).
+    multi_speaker: bool,
 };
 
 pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
@@ -37,8 +41,8 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Gemini 3.1 Flash TTS Preview",
                     .output_mime = "audio/l16",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
-                    .supports_speech_style = false,
+                    .max_speakers = null,
+                    .supports_speech_style = null,
                 },
                 .{
                     .model_id = "gemini-3.8-flash-lite-tts",
@@ -58,6 +62,8 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                 },
             },
             .base_url = "",
+            .carries_speech_style = true,
+            .multi_speaker = true,
         },
         .grok => .{
             .wire_shape = "SpeechXAI",
@@ -69,11 +75,13 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Grok TTS",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 24000,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
             },
             .base_url = "",
+            .carries_speech_style = false,
+            .multi_speaker = false,
         },
         .inworld => .{
             .wire_shape = "SpeechInworld",
@@ -85,7 +93,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Inworld TTS 1.5 Max",
                     .output_mime = "audio/wav",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = false,
                 },
                 .{
@@ -93,7 +101,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Inworld TTS 1.5 Mini",
                     .output_mime = "audio/wav",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = false,
                 },
                 .{
@@ -101,11 +109,13 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Inworld TTS 2",
                     .output_mime = "audio/wav",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
             },
             .base_url = "",
+            .carries_speech_style = false,
+            .multi_speaker = false,
         },
         .minimax => .{
             .wire_shape = "SpeechMiniMax",
@@ -117,7 +127,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "MiniMax Speech 2.6 HD",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -125,7 +135,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "MiniMax Speech 2.6 Turbo",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -133,7 +143,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "MiniMax Speech 2.8 HD",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -141,11 +151,13 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "MiniMax Speech 2.8 Turbo",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
             },
             .base_url = "https://api.minimax.io",
+            .carries_speech_style = false,
+            .multi_speaker = false,
         },
         .openai => .{
             .wire_shape = "SpeechOpenAI",
@@ -157,7 +169,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "GPT-4o mini TTS",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -165,7 +177,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "TTS 1",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = false,
                 },
                 .{
@@ -173,11 +185,13 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "TTS 1 HD",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = false,
                 },
             },
             .base_url = "",
+            .carries_speech_style = true,
+            .multi_speaker = false,
         },
         .openrouter => .{
             .wire_shape = "SpeechOpenAI",
@@ -213,7 +227,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Fish Audio Drama 3",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -221,7 +235,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Fish Audio S2.1 Pro",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -229,7 +243,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Gemini 3.1 Flash TTS Preview",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -237,7 +251,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Gemini 3.8 Flash Lite TTS",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -245,7 +259,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Gemini 3.8 Flash TTS",
                     .output_mime = "audio/mpeg",
                     .sample_rate_hz = 0,
-                    .max_speakers = 0,
+                    .max_speakers = null,
                     .supports_speech_style = true,
                 },
                 .{
@@ -266,6 +280,8 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                 },
             },
             .base_url = "",
+            .carries_speech_style = false,
+            .multi_speaker = false,
         },
         else => null,
     };
