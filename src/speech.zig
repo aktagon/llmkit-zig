@@ -182,11 +182,16 @@ pub const Speech = struct {
         }
         const model_id = self.model_ orelse return error.UnknownSpeechModel;
         const def = findSpeechModel(cfg, model_id) orelse return error.UnknownSpeechModel;
+        // The config's body decides what can be carried; a model fact blocks
+        // only when stated (null = unknown sends, decision 009, HANDOFF-099).
         if (self.speakers_.len > 0) {
-            if (def.max_speakers == 0) return error.SpeakersUnsupported;
-            if (@as(i64, @intCast(self.speakers_.len)) != def.max_speakers) return error.WrongSpeakerCount;
+            if (!cfg.multi_speaker or def.max_speakers == 1) return error.SpeakersUnsupported;
+            if (def.max_speakers) |max| {
+                if (@as(i64, @intCast(self.speakers_.len)) != max) return error.WrongSpeakerCount;
+            }
         }
-        if ((style_set or line_styled) and !def.supports_speech_style) return error.StyleUnsupported;
+        if ((style_set or line_styled) and (!cfg.carries_speech_style or def.supports_speech_style == false))
+            return error.StyleUnsupported;
     }
 
     /// Build the text-to-speech request body as a dynamic JSON Value backed by
@@ -944,6 +949,36 @@ const Recorder = struct {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Decision 009 (HANDOFF-099): the 3.1 preview states no speaker count and no
+// style support. Unknown is not false, so the request reaches the provider.
+fn expectUnknownFactsSend(sp: Speech, text: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    var mock = http.MockTransport.init(gpa, &.{.{
+        .status = 200,
+        .body = "{\"steps\":[{\"type\":\"model_output\",\"content\":[{\"type\":\"audio\",\"data\":\"UklGRgI=\"}]}]}",
+    }});
+    defer mock.deinit();
+    const resp = try sp.generateWith(mock.transport(), arena_state.allocator(), "AIza-test", text);
+    try std.testing.expectEqualStrings("RIFF\x02", resp.audio.bytes);
+    try std.testing.expectEqual(@as(usize, 1), mock.captured.items.len);
+}
 
 
 
