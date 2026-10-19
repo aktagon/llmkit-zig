@@ -5,15 +5,15 @@
 //!   - `Speech.buildSpeechBody` produces the request body per the provider's
 //!     generated `wire_shape` fact (SpeechInworld -> the flat `{text, voiceId,
 //!     modelId, audioConfig, deliveryMode}` body; SpeechOpenAI -> the flat
-//!     `{model, input, voice, response_format}` body; SpeechGemini and
-//!     SpeechMiniMax have their own builders below) — never a provider-name
+//!     `{model, input, voice, response_format}` body; SpeechGemini,
+//!     SpeechMiniMax and SpeechXAI have their own builders below) — never a provider-name
 //!     switch. Slice 2 sends fixed shape defaults (Inworld LINEAR16/22050 ->
 //!     WAV + BALANCED delivery; OpenAI response_format mp3); format/voice-rate
 //!     selection is a later slice (ADR-049 OQ-5 / ADR-051).
 //!   - `parseSpeechResponse` projects a provider REPLY to a single `AudioData`,
 //!     dispatched on the generated `audio_response_encoding` fact
 //!     (base64Envelope -> decode the `audioContent` field, Inworld; rawBody ->
-//!     the whole body IS the audio bytes, OpenAI). Usage is NOT REPORTED:
+//!     the whole body IS the audio bytes, OpenAI and xAI). Usage is NOT REPORTED:
 //!     Inworld's `processedCharactersCount` is deliberately dropped (ADR-049
 //!     OQ-3 — the two TTS providers disagree on a characters axis, so it is not
 //!     mapped to a token dimension).
@@ -204,6 +204,8 @@ pub const Speech = struct {
             return buildGeminiSpeechBody(arena, self, text);
         if (std.mem.eql(u8, cfg.wire_shape, "SpeechMiniMax"))
             return buildMiniMaxSpeechBody(arena, self, text);
+        if (std.mem.eql(u8, cfg.wire_shape, "SpeechXAI"))
+            return buildXAISpeechBody(arena, self, text);
         return buildInworldSpeechBody(arena, self, text);
     }
 
@@ -310,6 +312,21 @@ fn buildMiniMaxSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8
     return body;
 }
 
+/// The xAI `/v1/tts` request body (HANDOFF-095): `{text, voice_id, language,
+/// output_format:{codec}}`. The endpoint has no model field. language is
+/// always "auto" (llmkit has no language option), and with_timestamps is never
+/// sent: it switches the reply from raw audio bytes to JSON.
+fn buildXAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8) BuildError!json.Value {
+    var body = json.object();
+    try json.set(arena, &body, "text", .{ .string = text });
+    if (sp.voice_) |v| try json.set(arena, &body, "voice_id", .{ .string = v });
+    try json.set(arena, &body, "language", .{ .string = "auto" });
+    var output_format = json.object();
+    try json.set(arena, &output_format, "codec", .{ .string = "mp3" });
+    try json.set(arena, &body, "output_format", output_format);
+    return body;
+}
+
 /// The Gemini TTS request body on the Interactions API (BUG-091): `{model,
 /// input:[{type:user_input, content:[{type:text, text}]}],
 /// response_format:{type:audio}, generation_config:{speech_config:[{voice}]},
@@ -387,7 +404,7 @@ fn buildGeminiSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8)
 /// Project a provider speech REPLY into the normalized `SpeechResponse`,
 /// dispatched on the provider's generated `audio_response_encoding` fact
 /// (ADR-051 OAA-002) — never a provider-name switch. `body` is the raw response
-/// bytes: "rawBody" (OpenAI) takes them verbatim as the audio; "base64Envelope"
+/// bytes: "rawBody" (OpenAI, xAI) takes them verbatim as the audio; "base64Envelope"
 /// (Inworld) parses a JSON envelope and base64-decodes the `audioContent` field.
 /// A 2xx body that does not parse to audio is a decoding error (HANDOFF-036 A5),
 /// never a silent empty clip. `mimeType` is the requested model's output MIME,
@@ -648,6 +665,37 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
