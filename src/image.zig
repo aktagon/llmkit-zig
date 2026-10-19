@@ -85,7 +85,9 @@ pub const Multipart = struct {
 
 /// A fixed, deterministic multipart boundary, chosen as in `transcription.zig`.
 const edit_boundary = "----llmkitZigImageEditBoundary7MA4YWxkTrZu0gW";
-pub const ParseError = error{UnsupportedImageProvider} || std.mem.Allocator.Error;
+/// `UnsupportedImageResponseShape`: the config names a response shape no
+/// parser handles (BUG-105).
+pub const ParseError = error{ UnsupportedImageProvider, UnsupportedImageResponseShape } || std.mem.Allocator.Error;
 /// Pre-flight rejections. Zig error sets carry no payload, so each names the
 /// KIND where the other SDKs return `ValidationError{Field, Message}`
 /// (ADR-076 §3); all four correspond to field "model" or "parts".
@@ -651,10 +653,16 @@ fn buildInputRefsBody(arena: std.mem.Allocator, img: Image, parts: []const Image
 pub fn parseImageResponse(arena: std.mem.Allocator, provider: ProviderName, raw: json.Value) ParseError!ImageResponse {
     const cfg = image_gen.imageGenConfig(provider) orelse
         return error.UnsupportedImageProvider;
+    return parseImageFor(arena, cfg, raw);
+}
 
+/// Decode `raw` per `cfg.response_shape`.
+fn parseImageFor(arena: std.mem.Allocator, cfg: image_gen.ImageGenDef, raw: json.Value) ParseError!ImageResponse {
     if (std.mem.eql(u8, cfg.response_shape, "DataArrayB64Json"))
         return parseDataArrayB64Json(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
-    return parseGoogleParts(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
+    if (std.mem.eql(u8, cfg.response_shape, "GoogleParts"))
+        return parseGoogleParts(arena, raw, cfg.usage_input_path, cfg.usage_output_path, cfg.usage_reasoning_path);
+    return error.UnsupportedImageResponseShape;
 }
 
 /// Decode the `data[].b64_json` shape (OpenAI / xAI / Recraft). SVG bytes
@@ -1296,3 +1304,20 @@ const TestCounter = struct {
         return .{ .ptr = self, .call_fn = call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -50,7 +50,9 @@ pub const VideoInput = struct {
     bytes: []const u8,
 };
 
-pub const BuildError = error{UnsupportedVideoProvider} || std.mem.Allocator.Error;
+/// `UnsupportedVideoWireShape`: the config names a wire shape no submit body
+/// handles (BUG-105).
+pub const BuildError = error{ UnsupportedVideoProvider, UnsupportedVideoWireShape } || std.mem.Allocator.Error;
 
 /// Pre-send rejections for a last frame and reference images (BUG-089). Zig
 /// errors carry no payload; the other SDKs raise a validation error with the
@@ -253,7 +255,11 @@ pub const Video = struct {
     pub fn buildSubmitBody(self: Video, arena: std.mem.Allocator, prompt: []const u8) BuildError!json.Value {
         const cfg = video_gen.videoGenConfig(self.provider) orelse
             return error.UnsupportedVideoProvider;
-        const shape = cfg.wire_shape;
+        return self.submitBodyFor(arena, cfg.wire_shape, prompt);
+    }
+
+    /// The submit body for `shape` (never a provider-name switch).
+    fn submitBodyFor(self: Video, arena: std.mem.Allocator, shape: []const u8, prompt: []const u8) BuildError!json.Value {
         const prompt_text = try self.promptText(arena, prompt);
 
         if (std.mem.eql(u8, shape, "VideoQwen"))
@@ -266,8 +272,11 @@ pub const Video = struct {
             return buildBedrockBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoOpenRouter"))
             return buildOpenRouterBody(arena, self, prompt_text);
-        // VideoGrok / VideoZhipu / VideoTogether / VideoMinimax / VideoVidu.
-        return buildSharedBody(arena, self, prompt_text);
+        if (std.mem.eql(u8, shape, "VideoGrok") or std.mem.eql(u8, shape, "VideoZhipu") or
+            std.mem.eql(u8, shape, "VideoTogether") or std.mem.eql(u8, shape, "VideoMinimax") or
+            std.mem.eql(u8, shape, "VideoVidu"))
+            return buildSharedBody(arena, self, prompt_text);
+        return error.UnsupportedVideoWireShape;
     }
 
     /// Reject a last frame or reference images the model or the request cannot
@@ -605,6 +614,15 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
 
 
 
