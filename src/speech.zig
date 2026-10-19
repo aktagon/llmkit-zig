@@ -69,7 +69,9 @@ pub const ValidationError = error{
     UnknownSpeechModel,
 };
 
-pub const BuildError = error{UnsupportedSpeechProvider} || ValidationError || std.mem.Allocator.Error;
+/// `UnsupportedSpeechWireShape`: the config names a wire shape no body
+/// builder handles (BUG-105).
+pub const BuildError = error{ UnsupportedSpeechProvider, UnsupportedSpeechWireShape } || ValidationError || std.mem.Allocator.Error;
 
 /// One named speaker of a multi-speaker request and its voice (BUG-091).
 pub const SpeechSpeaker = struct {
@@ -87,7 +89,9 @@ pub const SpeechLine = struct {
 /// `ApiError` is a hexEnvelope reply (MiniMax) whose `base_resp.status_code`
 /// is nonzero on an HTTP 200; Zig errors carry no payload, so `status_msg`
 /// does not travel with it (the other SDKs put it on their API error).
-pub const ParseError = error{ UnsupportedSpeechProvider, UnknownSpeechModel, InvalidSpeechResponse, ApiError } || std.mem.Allocator.Error;
+/// `UnsupportedSpeechAudioEncoding`: the config names an audio encoding no
+/// decoder handles (BUG-105).
+pub const ParseError = error{ UnsupportedSpeechProvider, UnknownSpeechModel, InvalidSpeechResponse, ApiError, UnsupportedSpeechAudioEncoding } || std.mem.Allocator.Error;
 
 /// The public Speech builder. Immutable value type: each chain method returns a
 /// fresh copy, so a forked chain never mutates its parent (the `Text`/`Image`
@@ -202,16 +206,7 @@ pub const Speech = struct {
         const cfg = speech_gen.speechGenConfig(self.provider) orelse
             return error.UnsupportedSpeechProvider;
         try self.validate(cfg, text);
-
-        if (std.mem.eql(u8, cfg.wire_shape, "SpeechOpenAI"))
-            return buildOpenAISpeechBody(arena, self, text);
-        if (std.mem.eql(u8, cfg.wire_shape, "SpeechGemini"))
-            return buildGeminiSpeechBody(arena, self, text);
-        if (std.mem.eql(u8, cfg.wire_shape, "SpeechMiniMax"))
-            return buildMiniMaxSpeechBody(arena, self, text);
-        if (std.mem.eql(u8, cfg.wire_shape, "SpeechXAI"))
-            return buildXAISpeechBody(arena, self, text);
-        return buildInworldSpeechBody(arena, self, text);
+        return speechBodyFor(arena, self, cfg, text);
     }
 
     /// Synthesize `text` and return the decoded clip. Mirrors Go
@@ -269,18 +264,35 @@ pub const Speech = struct {
     }
 };
 
+/// The request body for `cfg.wire_shape` (never a provider-name switch).
+fn speechBodyFor(arena: std.mem.Allocator, sp: Speech, cfg: speech_gen.SpeechGenDef, text: []const u8) BuildError!json.Value {
+    const format = cfg.requested_output_format;
+    if (std.mem.eql(u8, cfg.wire_shape, "SpeechOpenAI"))
+        return buildOpenAISpeechBody(arena, sp, text, format);
+    if (std.mem.eql(u8, cfg.wire_shape, "SpeechGemini"))
+        return buildGeminiSpeechBody(arena, sp, text);
+    if (std.mem.eql(u8, cfg.wire_shape, "SpeechMiniMax"))
+        return buildMiniMaxSpeechBody(arena, sp, text);
+    if (std.mem.eql(u8, cfg.wire_shape, "SpeechXAI"))
+        return buildXAISpeechBody(arena, sp, text, format);
+    if (std.mem.eql(u8, cfg.wire_shape, "SpeechInworld"))
+        return buildInworldSpeechBody(arena, sp, text, format);
+    return error.UnsupportedSpeechWireShape;
+}
+
 /// The Inworld `/tts/v1/voice` request body (flat JSON): `{text, voiceId,
-/// modelId, audioConfig:{audioEncoding, sampleRateHertz}, deliveryMode}`. Slice
-/// 2 fixes audioConfig LINEAR16/22050 (-> WAV) and BALANCED delivery (ADR-049
-/// OQ-5). Mirrors Rust `build_inworld_speech_body`.
-fn buildInworldSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8) BuildError!json.Value {
+/// modelId, audioConfig:{audioEncoding, sampleRateHertz}, deliveryMode}`. The
+/// audio encoding is the config's requested format (LINEAR16 -> WAV,
+/// HANDOFF-098); the sample rate (22050) and BALANCED delivery are fixed
+/// (ADR-049 OQ-5). Mirrors Rust `build_inworld_speech_body`.
+fn buildInworldSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8, format: []const u8) BuildError!json.Value {
     var body = json.object();
     try json.set(arena, &body, "text", .{ .string = text });
     if (sp.voice_) |v| try json.set(arena, &body, "voiceId", .{ .string = v });
     if (sp.model_) |m| try json.set(arena, &body, "modelId", .{ .string = m });
 
     var audio_config = json.object();
-    try json.set(arena, &audio_config, "audioEncoding", .{ .string = "LINEAR16" });
+    try json.set(arena, &audio_config, "audioEncoding", .{ .string = format });
     try json.set(arena, &audio_config, "sampleRateHertz", .{ .integer = 22050 });
     try json.set(arena, &body, "audioConfig", audio_config);
 
@@ -289,16 +301,14 @@ fn buildInworldSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8
 }
 
 /// The OpenAI `/v1/audio/speech` request body (flat JSON): `{model, input,
-/// voice, response_format}`. Slice 2 fixes response_format=mp3 (KISS; the
-/// model's output_mime is audio/mpeg to match), so the response body is mp3
-/// bytes. Format selection is a later slice. Mirrors Rust
-/// `build_openai_speech_body`.
-fn buildOpenAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8) BuildError!json.Value {
+/// voice, response_format}`. response_format is the config's requested format
+/// (HANDOFF-098). Mirrors Rust `build_openai_speech_body`.
+fn buildOpenAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8, format: []const u8) BuildError!json.Value {
     var body = json.object();
     if (sp.model_) |m| try json.set(arena, &body, "model", .{ .string = m });
     try json.set(arena, &body, "input", .{ .string = text });
     if (sp.voice_) |v| try json.set(arena, &body, "voice", .{ .string = v });
-    try json.set(arena, &body, "response_format", .{ .string = "mp3" });
+    try json.set(arena, &body, "response_format", .{ .string = format });
     // A style is sent as `instructions` (BUG-091), which gpt-4o-mini-tts accepts.
     if (sp.style_) |st| if (st.len > 0) try json.set(arena, &body, "instructions", .{ .string = st });
     return body;
@@ -320,14 +330,15 @@ fn buildMiniMaxSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8
 /// The xAI `/v1/tts` request body (HANDOFF-095): `{text, voice_id, language,
 /// output_format:{codec}}`. The endpoint has no model field. language is
 /// always "auto" (llmkit has no language option), and with_timestamps is never
-/// sent: it switches the reply from raw audio bytes to JSON.
-fn buildXAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8) BuildError!json.Value {
+/// sent: it switches the reply from raw audio bytes to JSON. The codec is the
+/// config's requested format (HANDOFF-098).
+fn buildXAISpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8, format: []const u8) BuildError!json.Value {
     var body = json.object();
     try json.set(arena, &body, "text", .{ .string = text });
     if (sp.voice_) |v| try json.set(arena, &body, "voice_id", .{ .string = v });
     try json.set(arena, &body, "language", .{ .string = "auto" });
     var output_format = json.object();
-    try json.set(arena, &output_format, "codec", .{ .string = "mp3" });
+    try json.set(arena, &output_format, "codec", .{ .string = format });
     try json.set(arena, &body, "output_format", output_format);
     return body;
 }
@@ -420,16 +431,22 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, mod
     const cfg = speech_gen.speechGenConfig(provider) orelse
         return error.UnsupportedSpeechProvider;
     const mime = (findSpeechModel(cfg, model_id) orelse return error.UnknownSpeechModel).output_mime;
+    return decodeSpeechAudio(arena, cfg.audio_response_encoding, mime, body);
+}
 
-    if (std.mem.eql(u8, cfg.audio_response_encoding, "rawBody")) {
+/// Decode `body` per the `encoding` fact (`audio_response_encoding`).
+fn decodeSpeechAudio(arena: std.mem.Allocator, encoding: []const u8, mime: []const u8, body: []const u8) ParseError!SpeechResponse {
+    if (std.mem.eql(u8, encoding, "rawBody")) {
         return .{ .audio = .{ .mime_type = mime, .bytes = try arena.dupe(u8, body) }, .usage = .{}, .finish_reason = null };
     }
-    if (std.mem.eql(u8, cfg.audio_response_encoding, "base64InteractionSteps")) {
+    if (std.mem.eql(u8, encoding, "base64InteractionSteps")) {
         return parseInteractionSteps(arena, mime, body);
     }
-    if (std.mem.eql(u8, cfg.audio_response_encoding, "hexEnvelope")) {
+    if (std.mem.eql(u8, encoding, "hexEnvelope")) {
         return parseHexEnvelope(arena, mime, body);
     }
+
+    if (!std.mem.eql(u8, encoding, "base64Envelope")) return error.UnsupportedSpeechAudioEncoding;
 
     // base64Envelope: {"audioContent": "<base64>", "usage": {...}}.
     const parsed = json.parse(arena, body) catch return error.InvalidSpeechResponse;
@@ -1002,6 +1019,7 @@ fn carryingConfig(models: []const speech_gen.SpeechModelDef) speech_gen.SpeechGe
         .gen_endpoint = "/v1beta/interactions",
         .models = models,
         .base_url = "",
+        .requested_output_format = "",
         .carries_speech_style = true,
         .multi_speaker = true,
     };
@@ -1011,6 +1029,34 @@ const unknown_facts_models = [_]speech_gen.SpeechModelDef{
     .{ .model_id = "gemini-tts-unstated", .label = "Gemini TTS", .output_mime = "audio/l16", .sample_rate_hz = 0, .max_speakers = null, .supports_speech_style = null },
     .{ .model_id = "gemini-tts-nostyle", .label = "Gemini TTS", .output_mime = "audio/l16", .sample_rate_hz = 0, .max_speakers = null, .supports_speech_style = false },
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

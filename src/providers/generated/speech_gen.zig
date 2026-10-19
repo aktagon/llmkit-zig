@@ -19,6 +19,8 @@ pub const SpeechGenDef = struct {
     wire_shape: []const u8,
     /// audio_response_encoding: "base64Envelope" | "rawBody" | "base64InteractionSteps" | "hexEnvelope" (ADR-051).
     audio_response_encoding: []const u8,
+    /// requested_output_format: the format token the body sends (mp3, LINEAR16); "" = the body sends no format (HANDOFF-098).
+    requested_output_format: []const u8,
     gen_endpoint: []const u8,
     models: []const SpeechModelDef,
     /// Speech API base when it differs from the chat base; "" = use chat base.
@@ -34,6 +36,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
         .google => .{
             .wire_shape = "SpeechGemini",
             .audio_response_encoding = "base64InteractionSteps",
+            .requested_output_format = "",
             .gen_endpoint = "/v1beta/interactions",
             .models = &.{
                 .{
@@ -68,6 +71,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
         .grok => .{
             .wire_shape = "SpeechXAI",
             .audio_response_encoding = "rawBody",
+            .requested_output_format = "mp3",
             .gen_endpoint = "/v1/tts",
             .models = &.{
                 .{
@@ -86,6 +90,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
         .inworld => .{
             .wire_shape = "SpeechInworld",
             .audio_response_encoding = "base64Envelope",
+            .requested_output_format = "LINEAR16",
             .gen_endpoint = "/tts/v1/voice",
             .models = &.{
                 .{
@@ -120,6 +125,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
         .minimax => .{
             .wire_shape = "SpeechMiniMax",
             .audio_response_encoding = "hexEnvelope",
+            .requested_output_format = "",
             .gen_endpoint = "/v1/t2a_v2",
             .models = &.{
                 .{
@@ -162,6 +168,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
         .openai => .{
             .wire_shape = "SpeechOpenAI",
             .audio_response_encoding = "rawBody",
+            .requested_output_format = "mp3",
             .gen_endpoint = "/v1/audio/speech",
             .models = &.{
                 .{
@@ -196,6 +203,7 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
         .openrouter => .{
             .wire_shape = "SpeechOpenAI",
             .audio_response_encoding = "rawBody",
+            .requested_output_format = "mp3",
             .gen_endpoint = "/v1/audio/speech",
             .models = &.{
                 .{
