@@ -55,8 +55,8 @@ pub const SpeechResponse = structs.SpeechResponse;
 ///   - `LinesRequired`: field "lines", "required when speakers are set".
 ///   - `SpeakersUnsupported`: field "speakers", "<model> does not support multiple speakers".
 ///   - `StyleUnsupported`: field "style", "<model> does not support a speech style".
-///   - `UnknownSpeechModel`: field "model", raised only when a speaker or
-///     style rule needs the model's facts.
+///   - `UnknownSpeechModel`: field "model", "<model> is not a known
+///     speech-generation model" (Go and Rust raise it on every call too).
 pub const ValidationError = error{
     UndeclaredSpeaker,
     WrongSpeakerCount,
@@ -87,7 +87,7 @@ pub const SpeechLine = struct {
 /// `ApiError` is a hexEnvelope reply (MiniMax) whose `base_resp.status_code`
 /// is nonzero on an HTTP 200; Zig errors carry no payload, so `status_msg`
 /// does not travel with it (the other SDKs put it on their API error).
-pub const ParseError = error{ UnsupportedSpeechProvider, InvalidSpeechResponse, ApiError } || std.mem.Allocator.Error;
+pub const ParseError = error{ UnsupportedSpeechProvider, UnknownSpeechModel, InvalidSpeechResponse, ApiError } || std.mem.Allocator.Error;
 
 /// The public Speech builder. Immutable value type: each chain method returns a
 /// fresh copy, so a forked chain never mutates its parent (the `Text`/`Image`
@@ -180,11 +180,8 @@ pub const Speech = struct {
                 if (st.len > 0) line_styled = true;
             }
         }
-        if (self.speakers_.len == 0 and !style_set and !line_styled) return;
         const model_id = self.model_ orelse return error.UnknownSpeechModel;
-        const def = for (cfg.models) |m| {
-            if (std.mem.eql(u8, m.model_id, model_id)) break m;
-        } else return error.UnknownSpeechModel;
+        const def = findSpeechModel(cfg, model_id) orelse return error.UnknownSpeechModel;
         if (self.speakers_.len > 0) {
             if (def.max_speakers == 0) return error.SpeakersUnsupported;
             if (@as(i64, @intCast(self.speakers_.len)) != def.max_speakers) return error.WrongSpeakerCount;
@@ -261,7 +258,7 @@ pub const Speech = struct {
             .model = self.model_ orelse "",
         }, try json.stringify(arena, body), "application/json");
 
-        return parseSpeechResponse(arena, self.provider, raw);
+        return parseSpeechResponse(arena, self.provider, self.model_ orelse "", raw);
     }
 };
 
@@ -393,17 +390,14 @@ fn buildGeminiSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8)
 /// bytes: "rawBody" (OpenAI) takes them verbatim as the audio; "base64Envelope"
 /// (Inworld) parses a JSON envelope and base64-decodes the `audioContent` field.
 /// A 2xx body that does not parse to audio is a decoding error (HANDOFF-036 A5),
-/// never a silent empty clip. `mimeType` is the provider's output MIME; Usage
-/// is left unreported (ADR-049 OQ-3). Mirrors Rust `parse_speech_response`.
-pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, body: []const u8) ParseError!SpeechResponse {
+/// never a silent empty clip. `mimeType` is the requested model's output MIME,
+/// since one provider's models can differ (Gemini 3.1 audio/l16, 3.8
+/// audio/wav; HANDOFF-096); Usage is left unreported (ADR-049 OQ-3). Mirrors
+/// Rust `parse_speech_response`.
+pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, model_id: []const u8, body: []const u8) ParseError!SpeechResponse {
     const cfg = speech_gen.speechGenConfig(provider) orelse
         return error.UnsupportedSpeechProvider;
-    // The seam has no request context, so it derives the output MIME from the
-    // provider's speech config. Every model of a provider shares one output MIME
-    // (Inworld audio/wav, OpenAI audio/mpeg), so the first model's is the
-    // provider-wide fallback — the value the full runtime threads from the
-    // requested model.
-    const mime: []const u8 = if (cfg.models.len > 0) cfg.models[0].output_mime else "";
+    const mime = (findSpeechModel(cfg, model_id) orelse return error.UnknownSpeechModel).output_mime;
 
     if (std.mem.eql(u8, cfg.audio_response_encoding, "rawBody")) {
         return .{ .audio = .{ .mime_type = mime, .bytes = try arena.dupe(u8, body) }, .usage = .{}, .finish_reason = null };
@@ -423,6 +417,15 @@ pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, bod
     if (b64.len == 0) return error.InvalidSpeechResponse;
     const decoded = base64Decode(arena, b64) catch return error.InvalidSpeechResponse;
     return .{ .audio = .{ .mime_type = mime, .bytes = decoded }, .usage = .{}, .finish_reason = null };
+}
+
+/// The speech model `model_id` names in `cfg`, or null when the provider does
+/// not list it.
+fn findSpeechModel(cfg: speech_gen.SpeechGenDef, model_id: []const u8) ?speech_gen.SpeechModelDef {
+    for (cfg.models) |m| {
+        if (std.mem.eql(u8, m.model_id, model_id)) return m;
+    }
+    return null;
 }
 
 /// Decode a Gemini TTS Interactions API reply (BUG-091). Google's documented
@@ -645,6 +648,53 @@ const Recorder = struct {
         return .{ .ptr = self, .call_fn = Recorder.call };
     }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
