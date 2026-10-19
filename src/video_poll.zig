@@ -150,7 +150,7 @@ const VideoAdapter = struct {
         // Veo, Vertex Veo, Bedrock and OpenRouter must carry their output when done: an
         // empty success would hand the caller nothing to fetch. Mirrors the
         // Rust done-but-empty guards (the other shapes return an empty list).
-        if (requiresOutput(vg.wire_shape) and
+        if ((try requiresOutput(vg.wire_shape)) and
             (resp.videos.len == 0 or (resp.videos[0].url.len == 0 and resp.videos[0].bytes.len == 0)))
             return error.VideoMissingOutput;
 
@@ -228,10 +228,18 @@ const VideoAdapter = struct {
     }
 };
 
-fn requiresOutput(shape: []const u8) bool {
+/// Whether a done job of `shape` must carry its output. Every shape is named;
+/// an unnamed one is an error (BUG-105).
+fn requiresOutput(shape: []const u8) error{UnsupportedVideoWireShape}!bool {
     const eq = std.mem.eql;
-    return eq(u8, shape, "VideoVeo") or eq(u8, shape, "VideoVertexVeo") or eq(u8, shape, "VideoBedrock") or
-        eq(u8, shape, "VideoOpenRouter");
+    if (eq(u8, shape, "VideoVeo") or eq(u8, shape, "VideoVertexVeo") or eq(u8, shape, "VideoBedrock") or
+        eq(u8, shape, "VideoOpenRouter"))
+        return true;
+    if (eq(u8, shape, "VideoGrok") or eq(u8, shape, "VideoZhipu") or eq(u8, shape, "VideoTogether") or
+        eq(u8, shape, "VideoQwen") or eq(u8, shape, "VideoMinimax") or eq(u8, shape, "VideoVidu") or
+        eq(u8, shape, "VideoPixVerse"))
+        return false;
+    return error.UnsupportedVideoWireShape;
 }
 
 fn parseBody(arena: std.mem.Allocator, body: []const u8) !json.Value {
@@ -385,3 +393,9 @@ pub fn traceId(arena: std.mem.Allocator, io: std.Io) ![]const u8 {
     const h = std.fmt.bytesToHex(b, .lower);
     return std.fmt.allocPrint(arena, "{s}-{s}-{s}-{s}-{s}", .{ h[0..8], h[8..12], h[12..16], h[16..20], h[20..32] });
 }
+
+
+
+
+
+
