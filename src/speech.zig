@@ -964,21 +964,56 @@ const Recorder = struct {
 
 
 
-// Decision 009 (HANDOFF-099): the 3.1 preview states no speaker count and no
-// style support. Unknown is not false, so the request reaches the provider.
-fn expectUnknownFactsSend(sp: Speech, text: []const u8) !void {
+// The 3.1 preview states maxSpeakers 1 and no style support (live probe,
+// HANDOFF-099), so both requests stop before send. Other SDKs report field
+// "speakers", "gemini-3.1-flash-tts-preview does not support multiple
+// speakers" and field "style", "gemini-3.1-flash-tts-preview does not support
+// a speech style"; Zig errors carry the kind only (ADR-076 §3).
+fn expectRejectedBeforeSend(expected: anyerror, sp: Speech, text: []const u8) !void {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
-    var mock = http.MockTransport.init(gpa, &.{.{
-        .status = 200,
-        .body = "{\"steps\":[{\"type\":\"model_output\",\"content\":[{\"type\":\"audio\",\"data\":\"UklGRgI=\"}]}]}",
-    }});
+    var mock = http.MockTransport.init(gpa, &.{.{ .status = 200, .body = "ID3" }});
     defer mock.deinit();
-    const resp = try sp.generateWith(mock.transport(), arena_state.allocator(), "AIza-test", text);
-    try std.testing.expectEqualStrings("RIFF\x02", resp.audio.bytes);
-    try std.testing.expectEqual(@as(usize, 1), mock.captured.items.len);
+    try std.testing.expectError(expected, sp.generateWith(mock.transport(), arena_state.allocator(), "AIza-test", text));
+    try std.testing.expectEqual(@as(usize, 0), mock.captured.items.len);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Decision 009 (HANDOFF-099) at the check: a config that can carry speakers
+// and a style, with a model that states neither max_speakers nor
+// supports_speech_style, lets both requests through. No catalogue model has
+// such an unknown fact today (owner, 2026-10-19).
+fn carryingConfig(models: []const speech_gen.SpeechModelDef) speech_gen.SpeechGenDef {
+    return .{
+        .wire_shape = "SpeechGemini",
+        .audio_response_encoding = "base64InteractionSteps",
+        .gen_endpoint = "/v1beta/interactions",
+        .models = models,
+        .base_url = "",
+        .carries_speech_style = true,
+        .multi_speaker = true,
+    };
+}
+
+const unknown_facts_models = [_]speech_gen.SpeechModelDef{
+    .{ .model_id = "gemini-tts-unstated", .label = "Gemini TTS", .output_mime = "audio/l16", .sample_rate_hz = 0, .max_speakers = null, .supports_speech_style = null },
+    .{ .model_id = "gemini-tts-nostyle", .label = "Gemini TTS", .output_mime = "audio/l16", .sample_rate_hz = 0, .max_speakers = null, .supports_speech_style = false },
+};
+
+
+
 
 
 
