@@ -44,6 +44,7 @@ pub const ProviderName = providers.ProviderName;
 /// Rust's `SHAPE_PREDICT`/`SHAPE_MINIMAX` do).
 const shape_predict = "MusicPredict";
 const shape_minimax = "MusicMinimax";
+const shape_generate_content = "MusicGenerateContent";
 
 /// One decoded audio clip: the provider's output MIME plus RAW bytes. The same
 /// type as the speech path's `AudioData` — ADR-037 reuses the container rather
@@ -55,12 +56,15 @@ pub const AudioData = structs.AudioData;
 /// reason (Vertex reports `raiFilteredReason` when a clip was filtered).
 pub const MusicResponse = structs.MusicResponse;
 
+/// `UnsupportedMusicWireShape`: the config names a wire shape no body builder
+/// or parser handles (BUG-105).
 pub const BuildError = error{
     UnsupportedMusicProvider,
     UnknownMusicModel,
+    UnsupportedMusicWireShape,
 } || std.mem.Allocator.Error;
 
-pub const ParseError = error{UnsupportedMusicProvider} || std.mem.Allocator.Error;
+pub const ParseError = error{ UnsupportedMusicProvider, UnsupportedMusicWireShape } || std.mem.Allocator.Error;
 
 /// Fixed capacity for `Music.text` + `Music.lyrics` Parts — chain methods take
 /// no allocator (ADR-069 ZIG-005), matching `Text`'s bounded media array.
@@ -151,7 +155,11 @@ pub const Music = struct {
         const cfg = music_gen.musicGenConfig(self.provider) orelse
             return error.UnsupportedMusicProvider;
         _ = try self.resolveModel(cfg);
+        return self.musicBodyFor(arena, cfg, prompt);
+    }
 
+    /// The request body for `cfg.wire_shape` (never a provider-name switch).
+    fn musicBodyFor(self: Music, arena: std.mem.Allocator, cfg: music_gen.MusicGenDef, prompt: []const u8) BuildError!json.Value {
         const lyrics_text = try self.joined(arena, .lyrics, "");
         const prompt_text = try self.joined(arena, .text, prompt);
 
@@ -159,7 +167,9 @@ pub const Music = struct {
             return buildPredictBody(arena, prompt_text, lyrics_text);
         if (std.mem.eql(u8, cfg.wire_shape, shape_minimax))
             return buildMinimaxBody(arena, prompt_text, lyrics_text, self.model_ orelse "");
-        return buildGeminiBody(arena, prompt, self.parts_[0..self.part_count_]);
+        if (std.mem.eql(u8, cfg.wire_shape, shape_generate_content))
+            return buildGeminiBody(arena, prompt, self.parts_[0..self.part_count_]);
+        return error.UnsupportedMusicWireShape;
     }
 
     /// Generate music and return the decoded clips. Mirrors Go `GenerateMusic` /
@@ -323,12 +333,18 @@ pub fn parseMusicResponse(
     raw: json.Value,
 ) ParseError!MusicResponse {
     const cfg = music_gen.musicGenConfig(provider) orelse return error.UnsupportedMusicProvider;
+    return parseMusicFor(arena, cfg.wire_shape, fallback_mime, raw);
+}
 
-    if (std.mem.eql(u8, cfg.wire_shape, shape_predict))
+/// Decode `raw` per `wire_shape`.
+fn parseMusicFor(arena: std.mem.Allocator, wire_shape: []const u8, fallback_mime: []const u8, raw: json.Value) ParseError!MusicResponse {
+    if (std.mem.eql(u8, wire_shape, shape_predict))
         return parsePredictResponse(arena, raw, fallback_mime);
-    if (std.mem.eql(u8, cfg.wire_shape, shape_minimax))
+    if (std.mem.eql(u8, wire_shape, shape_minimax))
         return parseMinimaxResponse(arena, raw, fallback_mime);
-    return parseGeminiResponse(arena, raw, fallback_mime);
+    if (std.mem.eql(u8, wire_shape, shape_generate_content))
+        return parseGeminiResponse(arena, raw, fallback_mime);
+    return error.UnsupportedMusicWireShape;
 }
 
 fn parsePredictResponse(arena: std.mem.Allocator, raw: json.Value, fallback_mime: []const u8) !MusicResponse {
@@ -432,6 +448,22 @@ const testing = std.testing;
 fn testMusic(gpa: std.mem.Allocator, provider: ProviderName) Music {
     return .{ .provider = provider, .ctx = .{ .gpa = gpa, .io = testing.io } };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
