@@ -41,8 +41,8 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
                     .label = "Gemini 3.1 Flash TTS Preview",
                     .output_mime = "audio/l16",
                     .sample_rate_hz = 0,
-                    .max_speakers = null,
-                    .supports_speech_style = null,
+                    .max_speakers = 1,
+                    .supports_speech_style = false,
                 },
                 .{
                     .model_id = "gemini-3.8-flash-lite-tts",
