@@ -68,6 +68,26 @@ pub const FrameError = error{
     LastFrameWithoutFirstFrame,
 };
 
+/// Pre-send rejections for duration, aspect ratio and resolution
+/// (HANDOFF-097), checked in this order (Go's `validateVideoOptions`). The
+/// other SDKs raise a validation error with the field and message named here:
+///   - `DurationNotSent` / `AspectRatioNotSent` / `ResolutionNotSent`: a set
+///     option on a wire shape other than VideoOpenRouter, the first of
+///     duration, aspect_ratio, resolution; "<provider> video does not send <field>".
+///   - `DurationNotPositive`: field "duration", "must be positive".
+///   - `DurationTooLong`: field "duration", "<model> takes at most <max> seconds, got <n>".
+///   - `ResolutionUnsupported`: field "resolution", "<model> does not support resolution <r>".
+///   - `AspectRatioUnsupported`: field "aspect_ratio", "<model> does not support aspect ratio <r>".
+pub const OptionError = error{
+    DurationNotSent,
+    AspectRatioNotSent,
+    ResolutionNotSent,
+    DurationNotPositive,
+    DurationTooLong,
+    ResolutionUnsupported,
+    AspectRatioUnsupported,
+};
+
 /// The most asset reference images a Veo request takes (Gemini API and Vertex
 /// Veo pages, read 2026-10-15).
 pub const max_reference_images = 3;
@@ -105,6 +125,12 @@ pub const Video = struct {
     last_frame_: ?VideoInput = null,
     /// Asset reference images, at most 3 (BUG-089).
     reference_images_: []const VideoInput = &.{},
+    /// Video length in whole seconds; 0 = unset (HANDOFF-097).
+    duration_: i64 = 0,
+    /// Output aspect ratio such as "16:9"; "" = unset (HANDOFF-097).
+    aspect_ratio_: []const u8 = "",
+    /// Output resolution such as "720p"; "" = unset (HANDOFF-097).
+    resolution_: []const u8 = "",
 
     /// The video model id (ADR-021 bare-noun replacer). Carried in the body for
     /// the shared/qwen/pixverse shapes (as `model`) and Bedrock (as `modelId`);
@@ -155,6 +181,31 @@ pub const Video = struct {
     pub fn referenceImages(self: Video, v: []const VideoInput) Video {
         var s = self;
         s.reference_images_ = v;
+        return s;
+    }
+
+    /// The video length in whole seconds (HANDOFF-097; ADR-021 bare-noun
+    /// replacer). Only OpenRouter sends it; other providers reject it before
+    /// send, as does a value above the model's maximum.
+    pub fn duration(self: Video, seconds: i64) Video {
+        var s = self;
+        s.duration_ = seconds;
+        return s;
+    }
+
+    /// The output aspect ratio, such as "16:9" (HANDOFF-097). Only OpenRouter
+    /// sends it; a ratio the model does not list is rejected before send.
+    pub fn aspectRatio(self: Video, ratio: []const u8) Video {
+        var s = self;
+        s.aspect_ratio_ = ratio;
+        return s;
+    }
+
+    /// The output resolution, such as "720p" (HANDOFF-097). Only OpenRouter
+    /// sends it; a resolution the model does not list is rejected before send.
+    pub fn resolution(self: Video, r: []const u8) Video {
+        var s = self;
+        s.resolution_ = r;
         return s;
     }
 
@@ -242,6 +293,35 @@ pub const Video = struct {
         if (last and self.part_count_ == 0) return error.LastFrameWithoutFirstFrame;
     }
 
+    /// Reject a duration, aspect ratio or resolution the provider or the
+    /// model cannot take, before send (HANDOFF-097). Same rules and order as
+    /// Go's `validateVideoOptions`; see `OptionError`. A zero maximum or an
+    /// empty list means no known limit.
+    fn validateOptions(self: Video, cfg: video_gen.VideoGenDef) OptionError!void {
+        if (!std.mem.eql(u8, cfg.wire_shape, "VideoOpenRouter")) {
+            if (self.duration_ != 0) return error.DurationNotSent;
+            if (self.aspect_ratio_.len > 0) return error.AspectRatioNotSent;
+            if (self.resolution_.len > 0) return error.ResolutionNotSent;
+            return;
+        }
+        var max_duration: i64 = 0;
+        var resolutions: []const []const u8 = &.{};
+        var aspect_ratios: []const []const u8 = &.{};
+        for (cfg.models) |m| {
+            if (std.mem.eql(u8, m.model_id, self.model_ orelse "")) {
+                max_duration = m.max_duration_seconds;
+                resolutions = m.resolutions;
+                aspect_ratios = m.aspect_ratios;
+            }
+        }
+        if (self.duration_ < 0) return error.DurationNotPositive;
+        if (self.duration_ > 0 and max_duration > 0 and self.duration_ > max_duration) return error.DurationTooLong;
+        if (self.resolution_.len > 0 and resolutions.len > 0 and !listed(resolutions, self.resolution_))
+            return error.ResolutionUnsupported;
+        if (self.aspect_ratio_.len > 0 and aspect_ratios.len > 0 and !listed(aspect_ratios, self.aspect_ratio_))
+            return error.AspectRatioUnsupported;
+    }
+
     /// The request's carried inputs (ADR-096): reference images, a seed frame
     /// with an optional last frame, or text only.
     fn carries(self: Video) []const []const u8 {
@@ -279,6 +359,7 @@ pub const Video = struct {
         // ADR-096: a seed frame selects the WithSeedFrame submit request;
         // a config with no such variant cannot send it.
         try self.validateFrames(cfg);
+        try self.validateOptions(cfg);
         const variant = try request_variant.select(cfg.variants, self.carries());
         const body = try self.buildSubmitBody(arena, prompt);
 
@@ -377,7 +458,19 @@ fn buildOpenRouterBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8)
         if (vid.last_frame_) |last| try frames.array.append(try openRouterFrame(arena, last, "last_frame"));
         try json.set(arena, &body, "frame_images", frames);
     }
+    // Video options (HANDOFF-097): body-root fields, each sent only when set,
+    // so the prompt-only body stays {model, prompt}; `validateOptions` has
+    // already checked each against the model.
+    if (vid.duration_ > 0) try json.set(arena, &body, "duration", .{ .integer = vid.duration_ });
+    if (vid.aspect_ratio_.len > 0) try json.set(arena, &body, "aspect_ratio", .{ .string = vid.aspect_ratio_ });
+    if (vid.resolution_.len > 0) try json.set(arena, &body, "resolution", .{ .string = vid.resolution_ });
     return body;
+}
+
+/// Whether `want` is one of `items`.
+fn listed(items: []const []const u8, want: []const u8) bool {
+    for (items) |item| if (std.mem.eql(u8, item, want)) return true;
+    return false;
 }
 
 /// One OpenRouter frame_images item.
@@ -512,6 +605,59 @@ const test_prompt = "A drone shot sweeping over snow-capped alpine peaks at sunr
 fn testCtx() http.Ctx {
     return .{ .gpa = std.testing.allocator, .io = std.testing.io };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
