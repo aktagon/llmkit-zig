@@ -59,6 +59,22 @@ pub fn speechGenConfig(provider: ProviderName) ?SpeechGenDef {
             },
             .base_url = "",
         },
+        .grok => .{
+            .wire_shape = "SpeechXAI",
+            .audio_response_encoding = "rawBody",
+            .gen_endpoint = "/v1/tts",
+            .models = &.{
+                .{
+                    .model_id = "grok-tts",
+                    .label = "Grok TTS",
+                    .output_mime = "audio/mpeg",
+                    .sample_rate_hz = 0,
+                    .max_speakers = 0,
+                    .supports_speech_style = false,
+                },
+            },
+            .base_url = "",
+        },
         .inworld => .{
             .wire_shape = "SpeechInworld",
             .audio_response_encoding = "base64Envelope",
