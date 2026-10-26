@@ -12,12 +12,13 @@
 //!     other provider GETs the `{id}`-templated poll endpoint. PixVerse also
 //!     needs a fresh `Ai-trace-id` header on the poll.
 //!   - `classify`: per `wire_shape`, because video status is not one string at
-//!     one path — PixVerse reports integer codes, Veo/Vertex an LRO `done` flag.
+//!     one path — PixVerse reports integer codes, Vertex Veo an LRO `done` flag.
 //!     An unknown wire shape is an error, never a silent Running.
 //!   - `result`: the per-shape video reference, the MiniMax file-retrieve hop
-//!     (`file_endpoint` set), and the `DeliveryDownload` byte fetch (Veo). A
-//!     finished job with no usable output (Veo with no uri, Vertex with no
-//!     bytes, Bedrock with no S3 uri) is an error, not an empty success.
+//!     (`file_endpoint` set), and the `DeliveryDownload` byte fetch
+//!     (OpenRouter). A finished job with no usable output (Vertex with no
+//!     bytes, Bedrock with no S3 uri, OpenRouter with no url) is an error, not
+//!     an empty success.
 //!
 //! A failed job is a `JobStatus{.failed}` whose `cause.message` carries the
 //! provider's message where it gives one. Every hop goes through
@@ -147,7 +148,7 @@ const VideoAdapter = struct {
         else
             try videoResult(arena, vg, pb.value);
 
-        // Veo, Vertex Veo, Bedrock and OpenRouter must carry their output when done: an
+        // Vertex Veo, Bedrock and OpenRouter must carry their output when done: an
         // empty success would hand the caller nothing to fetch. Mirrors the
         // Rust done-but-empty guards (the other shapes return an empty list).
         if ((try requiresOutput(vg.wire_shape)) and
@@ -232,8 +233,7 @@ const VideoAdapter = struct {
 /// an unnamed one is an error (BUG-105).
 fn requiresOutput(shape: []const u8) error{UnsupportedVideoWireShape}!bool {
     const eq = std.mem.eql;
-    if (eq(u8, shape, "VideoVeo") or eq(u8, shape, "VideoVertexVeo") or eq(u8, shape, "VideoBedrock") or
-        eq(u8, shape, "VideoOpenRouter"))
+    if (eq(u8, shape, "VideoVertexVeo") or eq(u8, shape, "VideoBedrock") or eq(u8, shape, "VideoOpenRouter"))
         return true;
     if (eq(u8, shape, "VideoGrok") or eq(u8, shape, "VideoZhipu") or eq(u8, shape, "VideoTogether") or
         eq(u8, shape, "VideoQwen") or eq(u8, shape, "VideoMinimax") or eq(u8, shape, "VideoVidu") or
@@ -282,7 +282,7 @@ fn classifyVideo(arena: std.mem.Allocator, shape: []const u8, raw: json.Value) !
         } else .running;
         return .{ .state = state, .raw_status = text };
     }
-    if (eq(u8, shape, "VideoVeo") or eq(u8, shape, "VideoVertexVeo")) {
+    if (eq(u8, shape, "VideoVertexVeo")) {
         // Long-running operation: `done` is the status. A done op with an
         // error object failed; the raw status is the flag as text.
         const done = if (json.getPath(raw, "done")) |v| v == .bool and v.bool else false;
@@ -323,8 +323,6 @@ fn videoResult(arena: std.mem.Allocator, vg: video_gen.VideoGenDef, raw: json.Va
     if (eq(u8, shape, "VideoTogether")) return urlResponse(arena, vg, stringAt(raw, "outputs.video_url"), 0);
     if (eq(u8, shape, "VideoQwen")) return urlResponse(arena, vg, stringAt(raw, "output.video_url"), 0);
     if (eq(u8, shape, "VideoBedrock")) return urlResponse(arena, vg, stringAt(raw, "outputDataConfig.s3OutputDataConfig.s3Uri"), 0);
-    if (eq(u8, shape, "VideoVeo"))
-        return urlResponse(arena, vg, stringAt(raw, "response.generateVideoResponse.generatedSamples[0].video.uri"), 0);
     if (eq(u8, shape, "VideoVertexVeo")) {
         // Inline base64 bytes: download delivery with no fetch hop.
         const b64 = stringAt(raw, "response.videos[0].bytesBase64Encoded");
