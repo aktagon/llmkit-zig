@@ -424,8 +424,7 @@ fn buildGeminiSpeechBody(arena: std.mem.Allocator, sp: Speech, text: []const u8)
 /// (Inworld) parses a JSON envelope and base64-decodes the `audioContent` field.
 /// A 2xx body that does not parse to audio is a decoding error (HANDOFF-036 A5),
 /// never a silent empty clip. `mimeType` is the requested model's output MIME,
-/// since one provider's models can differ (Gemini 3.1 audio/l16, 3.8
-/// audio/wav; HANDOFF-096); Usage is left unreported (ADR-049 OQ-3). Mirrors
+/// since one provider's models can differ (decision 009; HANDOFF-096); Usage is left unreported (ADR-049 OQ-3). Mirrors
 /// Rust `parse_speech_response`.
 pub fn parseSpeechResponse(arena: std.mem.Allocator, provider: ProviderName, model_id: []const u8, body: []const u8) ParseError!SpeechResponse {
     const cfg = speech_gen.speechGenConfig(provider) orelse
@@ -981,20 +980,25 @@ const Recorder = struct {
 
 
 
-// The 3.1 preview states maxSpeakers 1 and no style support (live probe,
-// HANDOFF-099), so both requests stop before send. Other SDKs report field
-// "speakers", "gemini-3.1-flash-tts-preview does not support multiple
-// speakers" and field "style", "gemini-3.1-flash-tts-preview does not support
-// a speech style"; Zig errors carry the kind only (ADR-076 §3).
-fn expectRejectedBeforeSend(expected: anyerror, sp: Speech, text: []const u8) !void {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    var mock = http.MockTransport.init(gpa, &.{.{ .status = 200, .body = "ID3" }});
-    defer mock.deinit();
-    try std.testing.expectError(expected, sp.generateWith(mock.transport(), arena_state.allocator(), "AIza-test", text));
-    try std.testing.expectEqual(@as(usize, 0), mock.captured.items.len);
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
