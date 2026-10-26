@@ -47,6 +47,10 @@ First release.
   Image generation on Vertex now fails with `error.UnsupportedImageProvider`
   before any request is sent. Vertex music and video are unchanged, and the
   Vertex default model is now `lyria-002`.
+- **Google video generation removed.** Google shut down the Gemini API Veo
+  preview models. Video generation on the `google` provider now fails with
+  `error.UnsupportedVideoProvider` before any request is sent. Veo stays
+  available on Vertex.
 
 ### Added
 

@@ -16,7 +16,7 @@
 //!         header is non-deterministic and OMITTED from the request-wire golden;
 //!         `submit` adds it, the body builder does not.
 //!       * `{instances:[{prompt}]}` with NO model — the model is in the submit
-//!         PATH, not the body (VideoVeo / Google, VideoVertexVeo / Vertex).
+//!         PATH, not the body (VideoVertexVeo / Vertex).
 //!       * Bedrock Nova Reel `{modelId, modelInput:{taskType, textToVideoParams:
 //!         {text}}, outputDataConfig:{s3OutputDataConfig:{s3Uri}}}` — the model
 //!         is in the body (modelId) and the caller S3 output URI is required.
@@ -94,8 +94,8 @@ pub const OptionError = error{
     AspectRatioUnsupported,
 };
 
-/// The most asset reference images a Veo request takes (Gemini API and Vertex
-/// Veo pages, read 2026-10-15).
+/// The most asset reference images a Vertex Veo request takes (Vertex Veo
+/// page, read 2026-10-15).
 pub const max_reference_images = 3;
 
 /// Fixed capacity for image-to-video seed Parts. Video chain methods take no
@@ -140,7 +140,7 @@ pub const Video = struct {
 
     /// The video model id (ADR-021 bare-noun replacer). Carried in the body for
     /// the shared/qwen/pixverse shapes (as `model`) and Bedrock (as `modelId`);
-    /// OMITTED for Veo/Vertex, which carry the model in the submit PATH.
+    /// OMITTED for Vertex Veo, which carries the model in the submit PATH.
     pub fn model(self: Video, m: []const u8) Video {
         var s = self;
         s.model_ = m;
@@ -191,7 +191,7 @@ pub const Video = struct {
     }
 
     /// The video length in whole seconds (HANDOFF-097; ADR-021 bare-noun
-    /// replacer). OpenRouter, Grok, Veo and Vertex Veo send it (HANDOFF-100);
+    /// replacer). OpenRouter, Grok and Vertex Veo send it (HANDOFF-100);
     /// other providers reject it before send, as does a value above the
     /// model's maximum.
     pub fn duration(self: Video, seconds: i64) Video {
@@ -273,7 +273,7 @@ pub const Video = struct {
             return buildQwenBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoPixVerse"))
             return buildPixVerseBody(arena, self, prompt_text);
-        if (std.mem.eql(u8, shape, "VideoVeo") or std.mem.eql(u8, shape, "VideoVertexVeo"))
+        if (std.mem.eql(u8, shape, "VideoVertexVeo"))
             return buildVeoBody(arena, self, prompt_text);
         if (std.mem.eql(u8, shape, "VideoBedrock"))
             return buildBedrockBody(arena, self, prompt_text);
@@ -309,8 +309,8 @@ pub const Video = struct {
         if (last and !supports_last) return error.LastFrameUnsupported;
         if (refs > 0 and !supports_refs) return error.ReferenceImagesUnsupported;
         if (refs > max_reference_images) return error.TooManyReferenceImages;
-        // Live 2026-10-15: Veo answers 400 "Unsupported video generation
-        // request"; Vertex documents the inputs as exclusive.
+        // Vertex documents the inputs as exclusive (live 2026-10-15, the Gemini
+        // API Veo answered 400 "Unsupported video generation request").
         if (refs > 0 and (self.part_count_ > 0 or last)) return error.ReferenceImagesWithFrame;
         if (last and self.part_count_ == 0) return error.LastFrameWithoutFirstFrame;
     }
@@ -427,7 +427,7 @@ pub const Video = struct {
 };
 
 /// Read the submit handle at the config's declared dotted path
-/// (`submit_handle_field`: Bedrock `invocationArn`, Veo `name`, DashScope
+/// (`submit_handle_field`: Bedrock `invocationArn`, Vertex Veo `name`, DashScope
 /// `output.task_id`, PixVerse `Resp.video_id`, …) — never a provider-name
 /// switch, and never a hardcoded path.
 ///
@@ -499,7 +499,7 @@ fn setRootVideoOptions(arena: std.mem.Allocator, body: *json.Value, vid: Video) 
 /// Whether a video wire shape has body fields for duration, aspect ratio and
 /// resolution (HANDOFF-097, HANDOFF-100).
 fn shapeSendsOptions(shape: []const u8) bool {
-    for ([_][]const u8{ "VideoOpenRouter", "VideoGrok", "VideoVeo", "VideoVertexVeo" }) |s|
+    for ([_][]const u8{ "VideoOpenRouter", "VideoGrok", "VideoVertexVeo" }) |s|
         if (std.mem.eql(u8, shape, s)) return true;
     return false;
 }
@@ -549,12 +549,12 @@ fn buildPixVerseBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) B
     return body;
 }
 
-/// The Veo submit body (Google Veo + Vertex Veo): the prompt nests under
+/// The Vertex Veo submit body: the prompt nests under
 /// `instances[]` and there is NO model field — the model is in the submit PATH
 /// (:predictLongRunning), not the body. A first frame (BUG-089) rides at
 /// `instances[0].image` as `{bytesBase64Encoded, mimeType}` — raw base64, no
-/// data: prefix — per the Vertex Veo reference (read 2026-10-15); the Gemini
-/// API shape is not yet live-verified. Absent on the text-to-video hot path.
+/// data: prefix — per the Vertex Veo reference (read 2026-10-15). Absent on the
+/// text-to-video hot path.
 fn buildVeoBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) BuildError!json.Value {
     var instance = json.object();
     try json.set(arena, &instance, "prompt", .{ .string = prompt });
@@ -567,8 +567,7 @@ fn buildVeoBody(arena: std.mem.Allocator, vid: Video, prompt: []const u8) BuildE
     }
     // Last frame and asset reference images (BUG-089): same
     // {bytesBase64Encoded, mimeType} wrapper. Reference images force an
-    // 8-second video, sent as the NUMBER 8 on both APIs (live 2026-10-15: the
-    // Gemini API rejects the string "8" its docs show).
+    // 8-second video, sent as the NUMBER 8.
     if (vid.last_frame_) |last| try json.set(arena, &instance, "lastFrame", try veoImage(arena, last));
     var parameters = json.object();
     if (vid.reference_images_.len > 0) {
