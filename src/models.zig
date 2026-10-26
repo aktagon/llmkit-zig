@@ -8,9 +8,9 @@
 //!     Pure, no IO, no key.
 //!   * The LIVE `/models` send — `ScopedModels.list` / `ScopedModels.get`.
 //!     `catalogueListRequest` assembles each page's request: it reads the
-//!     generated `catalogueConfig` (endpoint + cursor_param) and the base URL,
-//!     splices the QueryParamKey `?key=` for query-auth providers (Google), then
-//!     appends the pagination cursor as `&<cursor_param>=` — the same
+//!     generated `catalogueConfig` (endpoint + list_query + cursor_param) and the
+//!     base URL, splices the QueryParamKey `?key=` for query-auth providers
+//!     (Google), then the fixed list query (BUG-107), then appends the pagination cursor as `&<cursor_param>=` — the same
 //!     `?key=...&pageToken=...` order Go/Python/Rust/Swift assemble (CR-003
 //!     cross-SDK catalogue-URL byte-parity). Headers come from the shared
 //!     `http.composeHeaders` (auth + required + custom, never a provider-name
@@ -101,7 +101,7 @@ pub fn catalogueListRequest(
     custom: []const http.Header,
 ) !CatalogueRequest {
     const cfg = catalogue.catalogueConfig(provider) orelse return error.NotSupported;
-    return catalogueRequest(arena, provider, base_url_override, api_key, cfg.endpoint, cfg.cursor_param, cursor, custom);
+    return catalogueRequest(arena, provider, base_url_override, api_key, cfg.endpoint, cfg.list_query, cfg.cursor_param, cursor, custom);
 }
 
 fn catalogueRequest(
@@ -110,17 +110,21 @@ fn catalogueRequest(
     base_url_override: ?[]const u8,
     api_key: []const u8,
     endpoint: []const u8,
+    list_query: []const u8,
     cursor_param: []const u8,
     cursor: []const u8,
     custom: []const http.Header,
 ) !CatalogueRequest {
-    const url = try appendCursor(
-        arena,
-        // No SigV4 provider has a catalogue endpoint, so there is no region.
-        try buildCatalogueUrl(arena, provider, base_url_override, endpoint, api_key, ""),
-        cursor_param,
-        cursor,
-    );
+    // No SigV4 provider has a catalogue endpoint, so there is no region.
+    var url = try buildCatalogueUrl(arena, provider, base_url_override, endpoint, api_key, "");
+    // BUG-107: the provider's fixed list query (OpenRouter lists text-output
+    // models only without output_modalities=all) goes before the cursor.
+    // Get-by-id passes "" and never sends it.
+    if (list_query.len > 0) {
+        const sep: u8 = if (std.mem.indexOfScalar(u8, url, '?') != null) '&' else '?';
+        url = try std.fmt.allocPrint(arena, "{s}{c}{s}", .{ url, sep, list_query });
+    }
+    url = try appendCursor(arena, url, cursor_param, cursor);
     const headers = try http.composeHeaders(arena, provider, api_key, &.{}, null, custom);
     return .{ .method = .GET, .url = url, .headers = headers };
 }
@@ -350,7 +354,7 @@ pub const ScopedModels = struct {
         cfg: catalogue.CatalogueConfig,
     ) !models_parsers.ParsedModelRecord {
         const endpoint = try std.fmt.allocPrint(arena, "{s}/{s}", .{ cfg.endpoint, id });
-        const req = try catalogueRequest(arena, self.provider, self.ctx.base_url, api_key, endpoint, "", "", self.ctx.customHeaders());
+        const req = try catalogueRequest(arena, self.provider, self.ctx.base_url, api_key, endpoint, "", "", "", self.ctx.customHeaders());
         const body = try fetchPage(transport, arena, req);
         const envelope_key = if (std.mem.eql(u8, cfg.parser_kind, "ParseGoogleModels")) "models" else "data";
         const wrapped = try std.fmt.allocPrint(arena, "{{\"{s}\":[{s}]}}", .{ envelope_key, body });
