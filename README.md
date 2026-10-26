@@ -215,7 +215,7 @@ for (resp.audio) |clip| {
 
 ```zig
 const handle = try client.video()
-    .model("veo-3.0-generate-001")
+    .model("veo-3.1-generate-001")
     .submit(arena, key, "A paper boat drifting down a stream");
 
 const st = try handle.wait(arena);
