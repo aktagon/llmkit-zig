@@ -58,10 +58,8 @@ pub const ChatConfig = struct {
     /// is these and the prompt, newline-joined, skipping empty ones (the
     /// text-parts-openai golden). Empty keeps `prompt` as the text, unchanged.
     text_parts: []const []const u8 = &.{},
-    /// A multi-turn history (ADR-020). When non-empty, the body's message
-    /// array is built from it, with the user text appended as a final user
-    /// turn when non-empty; media Parts are not sent on this path (Rust
-    /// parity). Empty keeps the single-user-turn shape, byte for byte.
+    /// A multi-turn history (ADR-020). The body's message array is this
+    /// history followed by the prompt turn (user text plus media), BUG-108.
     history: []const structs.Message = &.{},
     /// Media Parts (image/file) that precede the prompt text Part in the user
     /// turn, in caller order (ADR-060). Empty keeps the bare-text wire shape.
@@ -180,21 +178,20 @@ fn userText(arena: std.mem.Allocator, text_parts: []const []const u8, prompt: []
     return std.mem.join(arena, "\n", texts.items);
 }
 
-/// The internal history for `cfg`, or an empty slice for the single-turn
-/// shape. The user text rides as a final user turn when non-empty, and every
-/// captured turn that cannot replay under `shape` is unwrapped to its
-/// projection (ADR-085 RSN-006).
+/// The one place a request becomes the message list every builder reads: the
+/// validated history, then the prompt and its media as a final `prompt` turn
+/// when it carries anything (BUG-108). Every captured turn that cannot replay
+/// under `shape` is unwrapped to its projection (ADR-085 RSN-006).
 fn historyMsgs(
     arena: std.mem.Allocator,
     cfg: ChatConfig,
     spec: providers.ProviderSpec,
     shape: []const u8,
 ) BuildError![]const messages_mod.Msg {
-    if (cfg.history.len == 0) return &.{};
     const converted = try messages_mod.toInternal(arena, cfg.history);
     var msgs: std.ArrayList(messages_mod.Msg) = .fromOwnedSlice(converted);
-    if (cfg.prompt.len > 0)
-        try msgs.append(arena, .{ .text = .{ .role = "user", .text = cfg.prompt } });
+    if (cfg.prompt.len > 0 or cfg.media.len > 0)
+        try msgs.append(arena, .{ .prompt = .{ .text = cfg.prompt, .media = cfg.media } });
     messages_mod.resolveTurns(msgs.items, spec, shape);
     return msgs.items;
 }
@@ -315,7 +312,7 @@ pub fn resolveWireShape(spec: providers.ProviderSpec, protocol: Protocol) BuildE
 /// The shared flat `[{role, content}]` message array used by both the Chat
 /// Completions (`messages`) and Responses (`input`) envelopes: a leading
 /// `{role:"system", content:...}` message when a system prompt is set, then the
-/// user turn (with any media Parts). Mirrors Go `buildFlatMessageArray`.
+/// message list (history, then the prompt turn). Mirrors Go `buildFlatMessageArray`.
 fn flatMessages(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const messages_mod.Msg, shape: []const u8) !json.Value {
     var messages = json.array(arena);
     if (cfg.system) |sys| {
@@ -324,14 +321,7 @@ fn flatMessages(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const message
         try json.set(arena, &sm, "content", .{ .string = sys });
         try messages.array.append(sm);
     }
-    if (msgs.len > 0) {
-        try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, shape);
-        return messages;
-    }
-    var um = json.object();
-    try json.set(arena, &um, "role", .{ .string = "user" });
-    try json.set(arena, &um, "content", try parts.openAIUserContent(arena, cfg.media, cfg.prompt));
-    try messages.array.append(um);
+    try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, shape);
     return messages;
 }
 
@@ -374,14 +364,7 @@ fn buildAnthropicBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const m
     if (cfg.system) |sys| try json.set(arena, &body, "system", .{ .string = sys });
 
     var messages = json.array(arena);
-    if (msgs.len > 0) {
-        try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, "ChatAnthropic");
-    } else {
-        var um = json.object();
-        try json.set(arena, &um, "role", .{ .string = "user" });
-        try json.set(arena, &um, "content", try parts.anthropicUserContent(arena, cfg.media, cfg.prompt));
-        try messages.array.append(um);
-    }
+    try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, "ChatAnthropic");
     try json.set(arena, &body, "messages", messages);
 
     // Options and root extras both land on `body` (no wrapper): opts_target == root.
@@ -403,16 +386,7 @@ fn buildGoogleBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const mess
     const spec = providers.spec(cfg.provider);
     var body = json.object();
 
-    if (msgs.len > 0) {
-        try json.set(arena, &body, "contents", try messages_mod.googleContents(arena, msgs, cfg.provider));
-    } else {
-        var contents = json.array(arena);
-        var turn = json.object();
-        try json.set(arena, &turn, "role", .{ .string = "user" });
-        try json.set(arena, &turn, "parts", try parts.googleParts(arena, cfg.media, cfg.prompt));
-        try contents.array.append(turn);
-        try json.set(arena, &body, "contents", contents);
-    }
+    try json.set(arena, &body, "contents", try messages_mod.googleContents(arena, msgs, cfg.provider));
 
     if (cfg.system) |sys| {
         var si = json.object();
@@ -466,16 +440,9 @@ fn buildBedrockBody(arena: std.mem.Allocator, cfg: ChatConfig, msgs: []const mes
     if (cfg.system) |sys|
         try json.set(arena, &body, "system", try textParts(arena, sys));
 
-    // User turn: `content` is an ARRAY of `{text:...}` blocks, not a bare string.
+    // Each turn's `content` is an ARRAY of `{text:...}` blocks, not a bare string.
     var messages = json.array(arena);
-    if (msgs.len > 0) {
-        try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, "ChatBedrock");
-    } else {
-        var turn = json.object();
-        try json.set(arena, &turn, "role", .{ .string = "user" });
-        try json.set(arena, &turn, "content", try parts.bedrockContent(arena, cfg.media, cfg.prompt));
-        try messages.array.append(turn);
-    }
+    try messages_mod.appendFlatHistory(arena, &messages, msgs, cfg.provider, "ChatBedrock");
     try json.set(arena, &body, "messages", messages);
 
     // Options nest in the `inferenceConfig` wrapper (opts_target = &wrapper);
