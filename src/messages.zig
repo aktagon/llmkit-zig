@@ -25,6 +25,7 @@ const structs = @import("providers/generated/structs.zig");
 const providers = @import("providers/generated/providers.zig");
 const request_defs = @import("providers/generated/request_defs.zig");
 const provider_turn = @import("provider_turn.zig");
+const parts = @import("parts.zig");
 
 pub const Message = structs.Message;
 pub const ToolCall = structs.ToolCall;
@@ -36,14 +37,20 @@ pub const Error = error{InvalidMessage} || std.mem.Allocator.Error;
 /// called tools, a tool turn carrying one result, or an assistant turn the
 /// provider serialized itself (ADR-085). A `turn` carries the projection it
 /// replaces, so `resolveTurns` can fall back to reconstruction when the payload
-/// cannot be replayed under the request's wire shape.
+/// cannot be replayed under the request's wire shape. A `prompt` is the final
+/// user turn of a Text, stream or batch request: the prompt text plus the media
+/// Parts attached to it (BUG-108). It is a variant of its own because media
+/// rides only on this turn, and `text` carries only {role, text}.
 pub const Msg = union(enum) {
     text: Text,
     calls: []const ToolCall,
     result: ToolResult,
     turn: Turn,
+    prompt: Prompt,
 
     pub const Text = struct { role: []const u8, text: []const u8 };
+
+    pub const Prompt = struct { text: []const u8, media: []const parts.MediaPart };
 
     /// `fallback` points into the request arena (see the module note).
     pub const Turn = struct { shape: []const u8, wire: []const u8, fallback: *const Msg };
@@ -213,6 +220,18 @@ fn appendProjected(
             }
             try out.array.append(entry);
         },
+        .prompt => |p| {
+            var entry = json.object();
+            try json.set(arena, &entry, "role", .{ .string = mapRole(spec, "user") });
+            const content = if (std.mem.eql(u8, shape, "ChatBedrock"))
+                try parts.bedrockContent(arena, p.media, p.text)
+            else if (std.mem.eql(u8, shape, "ChatAnthropic"))
+                try parts.anthropicUserContent(arena, p.media, p.text)
+            else
+                try parts.openAIUserContent(arena, p.media, p.text);
+            try json.set(arena, &entry, "content", content);
+            try out.array.append(entry);
+        },
         // `resolveTurns` already unwrapped anything unplaceable; this arm keeps
         // a payload the splice still refused from failing the request build.
         .turn => |t| try appendProjected(arena, out, t.fallback.*, provider, shape),
@@ -375,7 +394,7 @@ fn googleProjected(
     id_to_name: *std.StringHashMapUnmanaged([]const u8),
 ) !json.Value {
     var entry = json.object();
-    var parts = json.array(arena);
+    var blocks = json.array(arena);
     switch (m) {
         .result => |r| {
             var response = json.object();
@@ -385,7 +404,7 @@ fn googleProjected(
             try json.set(arena, &function_response, "response", response);
             var part = json.object();
             try json.set(arena, &part, "functionResponse", function_response);
-            try parts.array.append(part);
+            try blocks.array.append(part);
             try json.set(arena, &entry, "role", .{ .string = "user" });
         },
         .calls => |calls| {
@@ -396,19 +415,24 @@ fn googleProjected(
                 try json.set(arena, &function_call, "args", inputValue(call));
                 var part = json.object();
                 try json.set(arena, &part, "functionCall", function_call);
-                try parts.array.append(part);
+                try blocks.array.append(part);
             }
             try json.set(arena, &entry, "role", .{ .string = mapRole(spec, "assistant") });
         },
         .text => |t| {
             var part = json.object();
             try json.set(arena, &part, "text", .{ .string = t.text });
-            try parts.array.append(part);
+            try blocks.array.append(part);
             try json.set(arena, &entry, "role", .{ .string = mapRole(spec, t.role) });
+        },
+        .prompt => |p| {
+            try json.set(arena, &entry, "role", .{ .string = mapRole(spec, "user") });
+            try json.set(arena, &entry, "parts", try parts.googleParts(arena, p.media, p.text));
+            return entry;
         },
         .turn => |t| return googleProjected(arena, t.fallback.*, spec, id_to_name),
     }
-    try json.set(arena, &entry, "parts", parts);
+    try json.set(arena, &entry, "parts", blocks);
     return entry;
 }
 
@@ -436,9 +460,9 @@ pub fn extractToolCalls(
             });
         }
     } else if (std.mem.eql(u8, shape, "ChatGoogle")) {
-        const parts = json.getPath(raw, "candidates[0].content.parts") orelse return &.{};
-        if (parts != .array) return &.{};
-        for (parts.array.items) |part| {
+        const reply_parts = json.getPath(raw, "candidates[0].content.parts") orelse return &.{};
+        if (reply_parts != .array) return &.{};
+        for (reply_parts.array.items) |part| {
             const function_call = json.getPath(part, "functionCall") orelse continue;
             // Google issues no call id; the name stands in for it.
             const name = try stringOf(arena, json.getPath(function_call, "name"));
