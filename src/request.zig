@@ -140,7 +140,7 @@ pub fn buildChatBody(arena: std.mem.Allocator, cfg: ChatConfig) BuildError!json.
     var c = cfg;
     c.model = try effectiveModel(spec, cfg.model);
     c.prompt = try userText(arena, cfg.text_parts, cfg.prompt);
-    const msgs = try historyMsgs(arena, c, spec, shape);
+    const msgs = try requestMsgs(arena, c, spec, shape);
 
     var body = if (std.mem.eql(u8, shape, "ChatOpenAI"))
         try buildOpenAIBody(arena, c, msgs)
@@ -182,7 +182,7 @@ fn userText(arena: std.mem.Allocator, text_parts: []const []const u8, prompt: []
 /// validated history, then the prompt and its media as a final `prompt` turn
 /// when it carries anything (BUG-108). Every captured turn that cannot replay
 /// under `shape` is unwrapped to its projection (ADR-085 RSN-006).
-fn historyMsgs(
+fn requestMsgs(
     arena: std.mem.Allocator,
     cfg: ChatConfig,
     spec: providers.ProviderSpec,

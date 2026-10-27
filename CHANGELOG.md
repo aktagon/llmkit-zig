@@ -139,6 +139,9 @@ First release.
 
 ### Fixed
 
+- Images attached to a prompt after `text().history(...)` are now sent on
+  the last user turn. Before, a call with history dropped them.
+
 - **The package can be imported.** `b.dependency("llmkit", ...).module("llmkit")`
   found no module, because the build registered none by name.
 - Google requests put the model in the URL. They were sent to a path with a
