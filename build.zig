@@ -29,6 +29,11 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     const test_step = b.step("test", "Run the unit + wire-driver tests");
+    // `unit`: the in-module tests only, no wire driver. Zig is frozen
+    // (security tier), so make check runs this step: a new or changed golden
+    //
+    // reads the botocore-minted sigv4-poll-get golden (src/send.zig).
+    const unit_step = b.step("unit", "Run the in-module unit tests (no wire drivers)");
     const wire_request_step = b.step(
         "wire-request",
         "Run the request-wire driver and drop target/wire/request/<fixture>/zig.json artifacts",
@@ -60,7 +65,9 @@ pub fn build(b: *std.Build) void {
 
     // In-module unit tests (src/*.zig).
     const mod_tests = b.addTest(.{ .root_module = llmkit_mod });
-    test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    const run_mod_tests = b.addRunArtifact(mod_tests);
+    test_step.dependOn(&run_mod_tests.step);
+    unit_step.dependOn(&run_mod_tests.step);
 
     // Standalone test drivers under tests/ — each sees the `llmkit` module.
     // Each driver joins `test` plus its own filtered wire step (mirrors the
