@@ -391,10 +391,13 @@ pub const Agent = struct {
 /// as a measurement (ADR-081). Mirrors Rust `accumulate_usage`.
 fn addUsage(a: response.Usage, b: response.Usage) response.Usage {
     var out: response.Usage = .{};
-    inline for (std.meta.fields(response.Usage)) |f| {
-        const x = @field(a, f.name);
-        const y = @field(b, f.name);
-        @field(out, f.name) = if (x != null and y != null) x.? + y.? else null;
+    // FieldEnum, not std.meta.fields or @typeInfo: the struct type info changed
+    // shape in Zig 0.17, and this spelling compiles on 0.16 and 0.17.
+    inline for (comptime std.enums.values(std.meta.FieldEnum(response.Usage))) |field| {
+        const name = @tagName(field);
+        const x = @field(a, name);
+        const y = @field(b, name);
+        @field(out, name) = if (x != null and y != null) x.? + y.? else null;
     }
     return out;
 }
