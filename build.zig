@@ -84,6 +84,11 @@ pub fn build(b: *std.Build) void {
         driver_mod.addImport("llmkit", llmkit_mod);
         const driver_tests = b.addTest(.{ .root_module = driver_mod });
         const run_driver = b.addRunArtifact(driver_tests);
+        // A driver writes target/wire/<suite>/<fixture>/zig.json for the
+        // cross-SDK comparator, an output the build system does not track.
+        // Zig 0.17 caches a passed test run and skips it, so the files the
+        // Makefile just deleted would never come back.
+        run_driver.has_side_effects = true;
         test_step.dependOn(&run_driver.step);
         driver.wire_step.dependOn(&run_driver.step);
     }
