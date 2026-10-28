@@ -1,5 +1,11 @@
 # llmkit (Zig)
 
+> **Maintenance mode.** This SDK receives security fixes only. It gets no new
+> providers, models or features. For active development, use
+> [Go](https://github.com/aktagon/llmkit-go),
+> [TypeScript](https://github.com/aktagon/llmkit-ts) or
+> [Rust](https://github.com/aktagon/llmkit-rust).
+
 One Zig API for Anthropic, OpenAI, Google, and 30+ other providers, including local models through Ollama and vLLM. Switch providers without rewriting your request.
 
 Built on the Zig standard library: HTTP, JSON and TLS come from `std`, and the package has no dependencies. Requires Zig 0.16.0.
