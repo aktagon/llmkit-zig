@@ -142,8 +142,8 @@ fn fetchPage(transport: http.Transport, arena: std.mem.Allocator, req: Catalogue
 }
 
 fn scopeBodyMatches(body: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(body, "scope") != null or
-        std.ascii.indexOfIgnoreCase(body, "permission") != null;
+    return std.ascii.findIgnoreCase(body, "scope") != null or
+        std.ascii.findIgnoreCase(body, "permission") != null;
 }
 
 /// Decode one reply page with the generated parser the config names (never a
