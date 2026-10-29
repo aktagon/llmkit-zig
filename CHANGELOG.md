@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Builds and passes its tests on Zig 0.17.0 as well as 0.16.0.
+
 ## [1.0.0] — 2026-10-27
 
 First release.

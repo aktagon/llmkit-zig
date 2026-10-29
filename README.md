@@ -8,7 +8,7 @@
 
 One Zig API for Anthropic, OpenAI, Google, and 30+ other providers, including local models through Ollama and vLLM. Switch providers without rewriting your request.
 
-Built on the Zig standard library: HTTP, JSON and TLS come from `std`, and the package has no dependencies. Requires Zig 0.16.0.
+Built on the Zig standard library: HTTP, JSON and TLS come from `std`, and the package has no dependencies. Requires Zig 0.16.0 or 0.17.0.
 
 Also available for Go, TypeScript, Python, Rust, Swift, and Java.
 
