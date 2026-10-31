@@ -1,4 +1,4 @@
-//! Build script for the llmkit Zig SDK (Zig 0.16.0).
+//! Build script for the llmkit Zig SDK (Zig 0.16.0 or 0.17.0).
 //!
 //! One library module (`llmkit`, root `src/root.zig`) and a `test` step that
 //! runs both the in-module unit tests and every standalone driver under
